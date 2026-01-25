@@ -489,7 +489,7 @@ class JobStats:
         sacct_cmd = [
             self.slurm.sacct_path, "-j", job_id, "--noheader", "-P",
             "-o", "JobID,JobName,User,State,Submit,Start,End,Elapsed,Timelimit,"
-                  "NNodes,NCPUs,ReqMem,MaxRSS,AveCPU,TotalCPU,Partition,AllocGRES,ExitCode"
+                  "NNodes,NCPUs,ReqMem,MaxRSS,AveCPU,TotalCPU,Partition,AllocTRES,ExitCode"
         ]
         stdout, stderr, rc = self._run_command(sacct_cmd)
         if rc != 0 or not stdout.strip():
@@ -1248,6 +1248,7 @@ Examples:
     parser.add_argument('--config', '-c', help='Path to configuration file')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
+    parser.add_argument('--json', '-j', action='store_true', help='Output JSON')
 
     subparsers = parser.add_subparsers(dest='command', help='Commands')
 
@@ -1271,27 +1272,46 @@ Examples:
     html_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
     html_parser.set_defaults(func=cmd_html)
 
-    parser.add_argument('job_id', nargs='?', help='Slurm job ID (shortcut for status)')
-    parser.add_argument('--json', '-j', action='store_true', help='Output JSON (with job_id)')
-
     return parser
 
 
 def main() -> int:
     """Main entry point."""
+    # Check if first non-flag argument looks like a job ID (numeric)
+    # This allows "schmutz 12345" as shorthand for "schmutz status 12345"
+    argv = sys.argv[1:]
+    
+    # Find first positional argument (skip flags)
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg.startswith('-'):
+            # Skip flag and its value if it takes one
+            if arg in ('-c', '--config', '-o', '--output', '-s', '--session-path', '-u', '--user'):
+                i += 2
+            else:
+                i += 1
+        else:
+            # Found positional argument
+            if arg.isdigit() or (arg.replace('_', '').isdigit()):
+                # Looks like a job ID, insert 'status' command
+                argv.insert(i, 'status')
+            break
+    
     parser = create_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     setup_logging(verbose=args.verbose, debug=args.debug)
-
-    if args.command is None and args.job_id:
-        args.command = 'status'
-        args.func = cmd_status
-        return args.func(args)
 
     if args.command is None:
         parser.print_help()
         return 0
+
+    # Verify job_id for commands that require it
+    if args.command in ('status', 'update', 'html'):
+        if not hasattr(args, 'job_id') or not args.job_id:
+            print(f"Error: job_id is required for '{args.command}' command", file=sys.stderr)
+            return 1
 
     return args.func(args)
 
