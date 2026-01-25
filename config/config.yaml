@@ -1,0 +1,70 @@
+# Schmutz Configuration
+# =====================
+# Copy this file to /etc/schmutz/config.yaml or
+# ~/.config/schmutz/config.yaml
+
+# Open OnDemand Paths
+# -------------------
+
+# Root directory for OOD user data
+ood_data_root: /var/lib/ondemand-nginx
+
+# Relative path to session data within user directory
+session_data_dir: data/sys/dashboard/batch_connect/db
+
+# Logging
+# -------
+
+# Log level: DEBUG, INFO, WARNING, ERROR
+log_level: INFO
+
+# Session Card Appearance
+# -----------------------
+
+# Title displayed on the efficiency card
+card_title: Job Efficiency
+
+# Show optimization recommendations
+show_recommendations: true
+
+# Use compact display mode (smaller cards)
+compact_mode: false
+
+# Efficiency Thresholds
+# ---------------------
+# These determine the color coding of efficiency metrics
+# Values are percentages (0-100)
+
+thresholds:
+  # CPU efficiency thresholds
+  # Good (green): >= cpu_good
+  # Warning (yellow): >= cpu_warning
+  # Poor (red): < cpu_warning
+  cpu_good: 80.0
+  cpu_warning: 50.0
+  
+  # Memory efficiency thresholds
+  memory_good: 70.0
+  memory_warning: 40.0
+  
+  # GPU compute utilization thresholds
+  gpu_good: 70.0
+  gpu_warning: 40.0
+  
+  # GPU memory utilization thresholds
+  gpu_memory_good: 50.0
+  gpu_memory_warning: 25.0
+
+# Slurm Configuration
+# -------------------
+
+slurm:
+  # Paths to Slurm commands
+  # Adjust these if your Slurm installation uses non-standard paths
+  sstat_path: /usr/bin/sstat
+  sacct_path: /usr/bin/sacct
+  squeue_path: /usr/bin/squeue
+  scontrol_path: /usr/bin/scontrol
+  
+  # Timeout for Slurm commands (seconds)
+  command_timeout: 30

@@ -1,0 +1,1244 @@
+#!/usr/bin/env python3
+"""
+Schmutz - Slurm Job Efficiency Monitor for Open OnDemand
+
+A standalone CLI utility for displaying Slurm job efficiency metrics,
+inspired by jobstats and jobperf from Clemson University.
+
+This is a self-contained script with no external dependencies beyond
+Python 3.8+ standard library. PyYAML is optional for config file support.
+
+Usage:
+    schmutz <job_id>           Show efficiency for a job
+    schmutz status <job_id>    Same as above
+    schmutz update <job_id>    Update OOD session card for job
+    schmutz list               List active OOD sessions
+    schmutz html <job_id>      Generate HTML card output
+
+Drop this file into a shared location (e.g., /opt/slurm/bin/schmutz),
+make it executable (chmod +x), and all users can run it.
+"""
+
+__version__ = "1.0.0"
+
+import argparse
+import json
+import logging
+import os
+import pwd
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+# Try to import yaml, but make it optional
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Configuration Classes
+# =============================================================================
+
+@dataclass
+class EfficiencyThresholds:
+    """Thresholds for color-coded efficiency indicators."""
+    cpu_good: float = 80.0
+    cpu_warning: float = 50.0
+    memory_good: float = 70.0
+    memory_warning: float = 40.0
+    gpu_good: float = 70.0
+    gpu_warning: float = 40.0
+    gpu_memory_good: float = 50.0
+    gpu_memory_warning: float = 25.0
+
+
+@dataclass
+class SlurmConfig:
+    """Slurm-related configuration."""
+    sstat_path: str = "/usr/bin/sstat"
+    sacct_path: str = "/usr/bin/sacct"
+    squeue_path: str = "/usr/bin/squeue"
+    scontrol_path: str = "/usr/bin/scontrol"
+    command_timeout: int = 30
+
+
+@dataclass
+class Config:
+    """Main configuration class for Schmutz."""
+    ood_data_root: str = "/var/lib/ondemand-nginx"
+    session_data_dir: str = "data/sys/dashboard/batch_connect/db"
+    log_level: str = "INFO"
+    log_file: Optional[str] = None
+    thresholds: EfficiencyThresholds = field(default_factory=EfficiencyThresholds)
+    slurm: SlurmConfig = field(default_factory=SlurmConfig)
+    card_title: str = "Job Efficiency"
+    show_recommendations: bool = True
+    compact_mode: bool = False
+
+    @classmethod
+    def from_yaml(cls, config_path: str) -> "Config":
+        """Load configuration from a YAML file."""
+        if not HAS_YAML:
+            logger.warning("PyYAML not installed, using default configuration")
+            return cls()
+        
+        config_file = Path(config_path)
+        if not config_file.exists():
+            logger.warning(f"Config file not found: {config_path}, using defaults")
+            return cls()
+
+        try:
+            with open(config_file, 'r') as f:
+                data = yaml.safe_load(f) or {}
+            return cls.from_dict(data)
+        except Exception as e:
+            logger.error(f"Error parsing config file: {e}")
+            return cls()
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Config":
+        """Create configuration from a dictionary."""
+        thresholds_data = data.pop('thresholds', {})
+        slurm_data = data.pop('slurm', {})
+        thresholds = EfficiencyThresholds(**thresholds_data) if thresholds_data else EfficiencyThresholds()
+        slurm = SlurmConfig(**slurm_data) if slurm_data else SlurmConfig()
+        return cls(
+            thresholds=thresholds,
+            slurm=slurm,
+            **{k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        )
+
+    def get_user_session_path(self, username: str) -> Path:
+        """Get the OOD session data path for a specific user."""
+        return Path(self.ood_data_root) / username / self.session_data_dir
+
+
+def get_default_config_paths() -> List[str]:
+    """Return list of default configuration file paths to check."""
+    return [
+        "/etc/schmutz/config.yaml",
+        "/etc/schmutz/config.yml",
+        os.path.expanduser("~/.config/schmutz/config.yaml"),
+        os.path.expanduser("~/.config/schmutz/config.yml"),
+        "./config/config.yaml",
+        "./config.yaml",
+    ]
+
+
+def load_config(config_path: Optional[str] = None) -> Config:
+    """Load configuration from file or use defaults."""
+    if config_path:
+        return Config.from_yaml(config_path)
+    for path in get_default_config_paths():
+        if os.path.exists(path):
+            logger.info(f"Loading config from: {path}")
+            return Config.from_yaml(path)
+    logger.debug("No config file found, using defaults")
+    return Config()
+
+
+# =============================================================================
+# Job Statistics Classes
+# =============================================================================
+
+class JobState(Enum):
+    """Slurm job states."""
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    TIMEOUT = "TIMEOUT"
+    NODE_FAIL = "NODE_FAIL"
+    PREEMPTED = "PREEMPTED"
+    UNKNOWN = "UNKNOWN"
+
+    @classmethod
+    def from_string(cls, state_str: str) -> "JobState":
+        """Convert Slurm state string to enum."""
+        state_str = state_str.upper().split()[0]
+        try:
+            return cls(state_str)
+        except ValueError:
+            return cls.UNKNOWN
+
+    @property
+    def is_running(self) -> bool:
+        return self == JobState.RUNNING
+
+    @property
+    def is_completed(self) -> bool:
+        return self in (JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED,
+                       JobState.TIMEOUT, JobState.NODE_FAIL, JobState.PREEMPTED)
+
+    @property
+    def is_successful(self) -> bool:
+        return self == JobState.COMPLETED
+
+
+@dataclass
+class GPUMetrics:
+    """GPU utilization metrics."""
+    gpu_id: int = 0
+    gpu_name: str = ""
+    utilization: float = 0.0
+    memory_used: float = 0.0
+    memory_total: float = 0.0
+    memory_utilization: float = 0.0
+
+    @property
+    def memory_used_gb(self) -> float:
+        return self.memory_used / (1024 ** 3)
+
+    @property
+    def memory_total_gb(self) -> float:
+        return self.memory_total / (1024 ** 3)
+
+
+@dataclass
+class JobMetrics:
+    """Complete job metrics including efficiency calculations."""
+    job_id: str = ""
+    job_name: str = ""
+    user: str = ""
+    state: JobState = JobState.UNKNOWN
+    submit_time: Optional[datetime] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    elapsed_time: timedelta = field(default_factory=timedelta)
+    time_limit: timedelta = field(default_factory=timedelta)
+    num_nodes: int = 0
+    num_cpus: int = 0
+    num_gpus: int = 0
+    memory_requested: float = 0.0
+    partition: str = ""
+    cpu_time_total: float = 0.0
+    cpu_efficiency: float = 0.0
+    memory_used_max: float = 0.0
+    memory_used_avg: float = 0.0
+    memory_efficiency: float = 0.0
+    gpu_utilization_avg: float = 0.0
+    gpu_memory_utilization_avg: float = 0.0
+    gpu_metrics: List[GPUMetrics] = field(default_factory=list)
+    last_updated: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+    @property
+    def elapsed_seconds(self) -> float:
+        return self.elapsed_time.total_seconds()
+
+    @property
+    def time_limit_seconds(self) -> float:
+        return self.time_limit.total_seconds()
+
+    @property
+    def time_efficiency(self) -> float:
+        if self.time_limit_seconds <= 0:
+            return 0.0
+        return (self.elapsed_seconds / self.time_limit_seconds) * 100
+
+    @property
+    def memory_requested_gb(self) -> float:
+        return self.memory_requested / (1024 ** 3)
+
+    @property
+    def memory_used_max_gb(self) -> float:
+        return self.memory_used_max / (1024 ** 3)
+
+    @property
+    def has_gpus(self) -> bool:
+        return self.num_gpus > 0
+
+    def calculate_efficiency(self) -> None:
+        """Calculate efficiency metrics from raw data."""
+        if self.elapsed_seconds > 0 and self.num_cpus > 0:
+            max_cpu_time = self.elapsed_seconds * self.num_cpus
+            self.cpu_efficiency = (self.cpu_time_total / max_cpu_time) * 100
+            self.cpu_efficiency = min(100.0, max(0.0, self.cpu_efficiency))
+        if self.memory_requested > 0:
+            self.memory_efficiency = (self.memory_used_max / self.memory_requested) * 100
+            self.memory_efficiency = min(100.0, max(0.0, self.memory_efficiency))
+        if self.gpu_metrics:
+            self.gpu_utilization_avg = sum(g.utilization for g in self.gpu_metrics) / len(self.gpu_metrics)
+            self.gpu_memory_utilization_avg = sum(g.memory_utilization for g in self.gpu_metrics) / len(self.gpu_metrics)
+
+
+class JobStats:
+    """Collects job statistics from Slurm."""
+
+    def __init__(self, config: Optional[Config] = None):
+        self.config = config or Config()
+        self.slurm = self.config.slurm
+
+    def _run_command(self, cmd: List[str], timeout: Optional[int] = None) -> Tuple[str, str, int]:
+        """Run a shell command and return output."""
+        timeout = timeout or self.slurm.command_timeout
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return result.stdout, result.stderr, result.returncode
+        except subprocess.TimeoutExpired:
+            logger.error(f"Command timed out: {' '.join(cmd)}")
+            return "", "Command timed out", -1
+        except FileNotFoundError:
+            logger.error(f"Command not found: {cmd[0]}")
+            return "", f"Command not found: {cmd[0]}", -1
+        except Exception as e:
+            logger.error(f"Error running command {' '.join(cmd)}: {e}")
+            return "", str(e), -1
+
+    def get_job_state(self, job_id: str) -> JobState:
+        """Get the current state of a job."""
+        cmd = [self.slurm.squeue_path, "-j", job_id, "--noheader", "-o", "%T"]
+        stdout, stderr, rc = self._run_command(cmd)
+        if rc == 0 and stdout.strip():
+            return JobState.from_string(stdout.strip())
+        cmd = [self.slurm.sacct_path, "-j", job_id, "--noheader", "-P", "-o", "State", "-n"]
+        stdout, stderr, rc = self._run_command(cmd)
+        if rc == 0 and stdout.strip():
+            states = stdout.strip().split('\n')
+            if states:
+                return JobState.from_string(states[0])
+        return JobState.UNKNOWN
+
+    def _parse_memory(self, mem_str: str) -> float:
+        """Parse Slurm memory string to bytes."""
+        if not mem_str or mem_str == "":
+            return 0.0
+        mem_str = mem_str.strip().upper()
+        multipliers = {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3, 'T': 1024 ** 4}
+        match = re.match(r'^([\d.]+)([KMGT]?)$', mem_str)
+        if match:
+            value = float(match.group(1))
+            suffix = match.group(2)
+            return value * multipliers.get(suffix, 1)
+        try:
+            return float(mem_str)
+        except ValueError:
+            logger.warning(f"Could not parse memory value: {mem_str}")
+            return 0.0
+
+    def _parse_time(self, time_str: str) -> timedelta:
+        """Parse Slurm time string to timedelta."""
+        if not time_str or time_str == "":
+            return timedelta()
+        time_str = time_str.strip()
+        days = 0
+        if '-' in time_str:
+            days_part, time_str = time_str.split('-', 1)
+            days = int(days_part)
+        parts = time_str.split(':')
+        try:
+            if len(parts) == 3:
+                hours, minutes, seconds = map(float, parts)
+            elif len(parts) == 2:
+                hours = 0
+                minutes, seconds = map(float, parts)
+            elif len(parts) == 1:
+                hours = 0
+                minutes = 0
+                seconds = float(parts[0])
+            else:
+                return timedelta()
+            return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+        except ValueError:
+            logger.warning(f"Could not parse time value: {time_str}")
+            return timedelta()
+
+    def _parse_datetime(self, dt_str: str) -> Optional[datetime]:
+        """Parse Slurm datetime string."""
+        if not dt_str or dt_str in ("Unknown", "None", "N/A"):
+            return None
+        formats = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"]
+        for fmt in formats:
+            try:
+                return datetime.strptime(dt_str.strip(), fmt)
+            except ValueError:
+                continue
+        logger.warning(f"Could not parse datetime: {dt_str}")
+        return None
+
+    def _parse_cpu_time(self, cpu_time_str: str) -> float:
+        """Parse CPU time to seconds."""
+        td = self._parse_time(cpu_time_str)
+        return td.total_seconds()
+
+    def get_running_job_stats(self, job_id: str) -> Optional[JobMetrics]:
+        """Get statistics for a running job using sstat."""
+        metrics = JobMetrics(job_id=job_id, state=JobState.RUNNING)
+        metrics.last_updated = datetime.now()
+
+        squeue_cmd = [
+            self.slurm.squeue_path, "-j", job_id, "--noheader",
+            "-o", "%j|%u|%T|%V|%S|%L|%D|%C|%b|%m|%P"
+        ]
+        stdout, stderr, rc = self._run_command(squeue_cmd)
+        if rc != 0 or not stdout.strip():
+            logger.warning(f"Job {job_id} not found in squeue")
+            return None
+
+        parts = stdout.strip().split('|')
+        if len(parts) >= 11:
+            metrics.job_name = parts[0]
+            metrics.user = parts[1]
+            metrics.state = JobState.from_string(parts[2])
+            metrics.submit_time = self._parse_datetime(parts[3])
+            metrics.start_time = self._parse_datetime(parts[4])
+            time_left = self._parse_time(parts[5])
+            metrics.num_nodes = int(parts[6]) if parts[6].isdigit() else 1
+            metrics.num_cpus = int(parts[7]) if parts[7].isdigit() else 1
+            gres = parts[8]
+            if 'gpu' in gres.lower():
+                match = re.search(r'gpu[:\w]*:(\d+)', gres.lower())
+                if match:
+                    metrics.num_gpus = int(match.group(1))
+            metrics.memory_requested = self._parse_memory(parts[9])
+            metrics.partition = parts[10]
+            if metrics.start_time:
+                metrics.elapsed_time = datetime.now() - metrics.start_time
+                metrics.time_limit = metrics.elapsed_time + time_left
+
+        for step_suffix in ["", ".batch", ".0"]:
+            sstat_cmd = [
+                self.slurm.sstat_path, "-j", f"{job_id}{step_suffix}",
+                "--noheader", "-P", "-o", "JobID,AveCPU,MaxRSS,MaxVMSize,NTasks"
+            ]
+            stdout, stderr, rc = self._run_command(sstat_cmd)
+            if rc == 0 and stdout.strip():
+                for line in stdout.strip().split('\n'):
+                    parts = line.split('|')
+                    if len(parts) >= 5:
+                        metrics.cpu_time_total = self._parse_cpu_time(parts[1])
+                        metrics.memory_used_max = self._parse_memory(parts[2])
+                        break
+                break
+
+        metrics.calculate_efficiency()
+        return metrics
+
+    def get_completed_job_stats(self, job_id: str) -> Optional[JobMetrics]:
+        """Get statistics for a completed job using sacct."""
+        metrics = JobMetrics(job_id=job_id)
+        metrics.last_updated = datetime.now()
+
+        sacct_cmd = [
+            self.slurm.sacct_path, "-j", job_id, "--noheader", "-P",
+            "-o", "JobID,JobName,User,State,Submit,Start,End,Elapsed,Timelimit,"
+                  "NNodes,NCPUs,ReqMem,MaxRSS,AveCPU,TotalCPU,Partition,AllocGRES,ExitCode"
+        ]
+        stdout, stderr, rc = self._run_command(sacct_cmd)
+        if rc != 0 or not stdout.strip():
+            logger.warning(f"Job {job_id} not found in sacct: {stderr}")
+            return None
+
+        lines = stdout.strip().split('\n')
+        main_line = None
+        batch_line = None
+        for line in lines:
+            parts = line.split('|')
+            if parts:
+                step_id = parts[0]
+                if step_id == job_id or step_id == f"{job_id}.batch":
+                    if '.batch' in step_id:
+                        batch_line = parts
+                    else:
+                        main_line = parts
+
+        if not main_line:
+            main_line = lines[0].split('|') if lines else None
+        if not main_line or len(main_line) < 18:
+            logger.warning(f"Incomplete sacct output for job {job_id}")
+            return None
+
+        metrics.job_name = main_line[1]
+        metrics.user = main_line[2]
+        metrics.state = JobState.from_string(main_line[3])
+        metrics.submit_time = self._parse_datetime(main_line[4])
+        metrics.start_time = self._parse_datetime(main_line[5])
+        metrics.end_time = self._parse_datetime(main_line[6])
+        metrics.elapsed_time = self._parse_time(main_line[7])
+        metrics.time_limit = self._parse_time(main_line[8])
+        metrics.num_nodes = int(main_line[9]) if main_line[9].isdigit() else 1
+        metrics.num_cpus = int(main_line[10]) if main_line[10].isdigit() else 1
+
+        req_mem = main_line[11]
+        mem_multiplier = 1
+        if req_mem.endswith('n'):
+            mem_multiplier = metrics.num_nodes
+            req_mem = req_mem[:-1]
+        elif req_mem.endswith('c'):
+            mem_multiplier = metrics.num_cpus
+            req_mem = req_mem[:-1]
+        metrics.memory_requested = self._parse_memory(req_mem) * mem_multiplier
+        metrics.partition = main_line[15]
+
+        alloc_gres = main_line[16] if len(main_line) > 16 else ""
+        if 'gpu' in alloc_gres.lower():
+            match = re.search(r'gpu[:\w]*:(\d+)', alloc_gres.lower())
+            if match:
+                metrics.num_gpus = int(match.group(1))
+
+        if batch_line and len(batch_line) >= 15:
+            metrics.memory_used_max = self._parse_memory(batch_line[12])
+            metrics.cpu_time_total = self._parse_cpu_time(batch_line[14])
+        else:
+            metrics.memory_used_max = self._parse_memory(main_line[12])
+            metrics.cpu_time_total = self._parse_cpu_time(main_line[14])
+
+        metrics.calculate_efficiency()
+        return metrics
+
+    def get_job_stats(self, job_id: str) -> Optional[JobMetrics]:
+        """Get job statistics regardless of job state."""
+        state = self.get_job_state(job_id)
+        if state.is_running:
+            return self.get_running_job_stats(job_id)
+        elif state.is_completed:
+            return self.get_completed_job_stats(job_id)
+        elif state == JobState.PENDING:
+            metrics = JobMetrics(job_id=job_id, state=state)
+            metrics.last_updated = datetime.now()
+            return metrics
+        else:
+            result = self.get_completed_job_stats(job_id)
+            if result:
+                return result
+            return self.get_running_job_stats(job_id)
+
+
+# =============================================================================
+# Session Card Updater
+# =============================================================================
+
+class SessionCardUpdater:
+    """Updates Open OnDemand session cards with job efficiency information."""
+
+    CARD_STYLES = """
+<style>
+.job-efficiency-card {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 10px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    margin: 8px 0;
+}
+.job-efficiency-card h4 {
+    margin: 0 0 10px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #dee2e6;
+    color: #495057;
+    font-size: 14px;
+}
+.efficiency-section {
+    margin-bottom: 10px;
+}
+.efficiency-section:last-child {
+    margin-bottom: 0;
+}
+.efficiency-label {
+    font-weight: 500;
+    color: #6c757d;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.efficiency-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+}
+.efficiency-value {
+    font-weight: 600;
+    font-size: 14px;
+}
+.efficiency-bar {
+    height: 6px;
+    background: #e9ecef;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 2px;
+}
+.efficiency-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+.efficiency-good { color: #28a745; }
+.efficiency-warning { color: #ffc107; }
+.efficiency-poor { color: #dc3545; }
+.efficiency-neutral { color: #6c757d; }
+.bar-good { background: #28a745; }
+.bar-warning { background: #ffc107; }
+.bar-poor { background: #dc3545; }
+.recommendation {
+    margin-top: 10px;
+    padding: 8px;
+    background: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #856404;
+}
+.recommendation.good {
+    background: #d4edda;
+    border-color: #28a745;
+    color: #155724;
+}
+.job-summary {
+    margin-top: 10px;
+    padding: 8px;
+    background: #e9ecef;
+    border-radius: 4px;
+}
+.job-summary-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 2px 0;
+}
+.last-updated {
+    font-size: 10px;
+    color: #adb5bd;
+    text-align: right;
+    margin-top: 8px;
+}
+.compact .efficiency-row {
+    padding: 2px 0;
+}
+.compact .efficiency-section {
+    margin-bottom: 6px;
+}
+</style>
+"""
+
+    def __init__(self, config: Optional[Config] = None):
+        self.config = config or Config()
+        self.thresholds = self.config.thresholds
+
+    def _get_efficiency_class(self, value: float, good_threshold: float,
+                              warning_threshold: float, invert: bool = False) -> str:
+        """Get CSS class for efficiency value based on thresholds."""
+        if invert:
+            if value >= good_threshold:
+                return "poor"
+            elif value >= warning_threshold:
+                return "warning"
+            else:
+                return "good"
+        else:
+            if value >= good_threshold:
+                return "good"
+            elif value >= warning_threshold:
+                return "warning"
+            else:
+                return "poor"
+
+    def _format_duration(self, td: timedelta) -> str:
+        """Format timedelta as human-readable string."""
+        total_seconds = int(td.total_seconds())
+        if total_seconds < 0:
+            return "N/A"
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0 or days > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0 or hours > 0 or days > 0:
+            parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        return " ".join(parts[:3])
+
+    def _format_memory(self, bytes_val: float) -> str:
+        """Format bytes as human-readable string."""
+        if bytes_val <= 0:
+            return "N/A"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if abs(bytes_val) < 1024.0:
+                return f"{bytes_val:.1f} {unit}"
+            bytes_val /= 1024.0
+        return f"{bytes_val:.1f} PB"
+
+    def _generate_progress_bar(self, value: float, css_class: str) -> str:
+        """Generate HTML for a progress bar."""
+        value = max(0, min(100, value))
+        return f'''
+        <div class="efficiency-bar">
+            <div class="efficiency-bar-fill bar-{css_class}" style="width: {value:.1f}%"></div>
+        </div>
+        '''
+
+    def _generate_recommendations(self, metrics: JobMetrics) -> List[str]:
+        """Generate efficiency recommendations based on metrics."""
+        recommendations = []
+        if metrics.cpu_efficiency < self.thresholds.cpu_warning:
+            recommendations.append(
+                f"⚠️ CPU efficiency is low ({metrics.cpu_efficiency:.1f}%). "
+                f"Consider requesting fewer CPUs or optimizing CPU usage."
+            )
+        if metrics.memory_efficiency > 0:
+            if metrics.memory_efficiency < self.thresholds.memory_warning:
+                recommendations.append(
+                    f"⚠️ Memory usage is low ({metrics.memory_efficiency:.1f}%). "
+                    f"Consider requesting less memory to improve job scheduling."
+                )
+            elif metrics.memory_efficiency > 95:
+                recommendations.append(
+                    f"⚠️ Memory usage is very high ({metrics.memory_efficiency:.1f}%). "
+                    f"Consider requesting more memory to avoid out-of-memory errors."
+                )
+        if metrics.has_gpus and metrics.gpu_utilization_avg > 0:
+            if metrics.gpu_utilization_avg < self.thresholds.gpu_warning:
+                recommendations.append(
+                    f"⚠️ GPU utilization is low ({metrics.gpu_utilization_avg:.1f}%). "
+                    f"Ensure your code is properly utilizing GPUs."
+                )
+        if metrics.time_efficiency > 0 and metrics.time_efficiency < 10:
+            recommendations.append(
+                f"ℹ️ Job completed using only {metrics.time_efficiency:.1f}% of the time limit. "
+                f"Consider reducing the time limit for better scheduling priority."
+            )
+        return recommendations
+
+    def generate_running_card_html(self, metrics: JobMetrics) -> str:
+        """Generate HTML card content for a running job."""
+        compact_class = "compact" if self.config.compact_mode else ""
+        cpu_class = self._get_efficiency_class(
+            metrics.cpu_efficiency, self.thresholds.cpu_good, self.thresholds.cpu_warning
+        )
+        mem_class = self._get_efficiency_class(
+            metrics.memory_efficiency, self.thresholds.memory_good, self.thresholds.memory_warning
+        )
+
+        html = f"""
+{self.CARD_STYLES}
+<div class="job-efficiency-card {compact_class}">
+    <h4>📊 {self.config.card_title}</h4>
+    
+    <div class="efficiency-section">
+        <div class="efficiency-label">CPU Efficiency</div>
+        <div class="efficiency-row">
+            <span>Utilization</span>
+            <span class="efficiency-value efficiency-{cpu_class}">{metrics.cpu_efficiency:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.cpu_efficiency, cpu_class)}
+    </div>
+    
+    <div class="efficiency-section">
+        <div class="efficiency-label">Memory Usage</div>
+        <div class="efficiency-row">
+            <span>{self._format_memory(metrics.memory_used_max)} / {self._format_memory(metrics.memory_requested)}</span>
+            <span class="efficiency-value efficiency-{mem_class}">{metrics.memory_efficiency:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.memory_efficiency, mem_class)}
+    </div>
+"""
+
+        if metrics.has_gpus:
+            gpu_class = self._get_efficiency_class(
+                metrics.gpu_utilization_avg, self.thresholds.gpu_good, self.thresholds.gpu_warning
+            )
+            gpu_mem_class = self._get_efficiency_class(
+                metrics.gpu_memory_utilization_avg, self.thresholds.gpu_memory_good, self.thresholds.gpu_memory_warning
+            )
+            html += f"""
+    <div class="efficiency-section">
+        <div class="efficiency-label">GPU Utilization ({metrics.num_gpus} GPU{'s' if metrics.num_gpus > 1 else ''})</div>
+        <div class="efficiency-row">
+            <span>Compute</span>
+            <span class="efficiency-value efficiency-{gpu_class}">{metrics.gpu_utilization_avg:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.gpu_utilization_avg, gpu_class)}
+        <div class="efficiency-row">
+            <span>Memory</span>
+            <span class="efficiency-value efficiency-{gpu_mem_class}">{metrics.gpu_memory_utilization_avg:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.gpu_memory_utilization_avg, gpu_mem_class)}
+    </div>
+"""
+
+        html += f"""
+    <div class="job-summary">
+        <div class="job-summary-row">
+            <span>Elapsed Time:</span>
+            <span>{self._format_duration(metrics.elapsed_time)}</span>
+        </div>
+        <div class="job-summary-row">
+            <span>Time Limit:</span>
+            <span>{self._format_duration(metrics.time_limit)}</span>
+        </div>
+        <div class="job-summary-row">
+            <span>Resources:</span>
+            <span>{metrics.num_nodes}N × {metrics.num_cpus}C</span>
+        </div>
+    </div>
+"""
+
+        if self.config.show_recommendations:
+            recommendations = self._generate_recommendations(metrics)
+            if recommendations:
+                html += """
+    <div class="recommendation">
+        <strong>Tips:</strong><br>
+"""
+                for rec in recommendations:
+                    html += f"        {rec}<br>\n"
+                html += "    </div>\n"
+
+        updated_str = metrics.last_updated.strftime("%H:%M:%S") if metrics.last_updated else "Unknown"
+        html += f"""
+    <div class="last-updated">Last updated: {updated_str}</div>
+</div>
+"""
+        return html
+
+    def generate_completed_card_html(self, metrics: JobMetrics) -> str:
+        """Generate HTML card content for a completed job."""
+        compact_class = "compact" if self.config.compact_mode else ""
+
+        if metrics.state.is_successful:
+            status_icon = "✅"
+            status_text = "Completed Successfully"
+        elif metrics.state == JobState.CANCELLED:
+            status_icon = "🚫"
+            status_text = "Cancelled"
+        elif metrics.state == JobState.TIMEOUT:
+            status_icon = "⏱️"
+            status_text = "Timed Out"
+        else:
+            status_icon = "❌"
+            status_text = f"Failed ({metrics.state.value})"
+
+        cpu_class = self._get_efficiency_class(
+            metrics.cpu_efficiency, self.thresholds.cpu_good, self.thresholds.cpu_warning
+        )
+        mem_class = self._get_efficiency_class(
+            metrics.memory_efficiency, self.thresholds.memory_good, self.thresholds.memory_warning
+        )
+
+        html = f"""
+{self.CARD_STYLES}
+<div class="job-efficiency-card {compact_class}">
+    <h4>{status_icon} Job {status_text}</h4>
+    
+    <div class="job-summary">
+        <div class="job-summary-row">
+            <span>Job ID:</span>
+            <span>{metrics.job_id}</span>
+        </div>
+        <div class="job-summary-row">
+            <span>Total Runtime:</span>
+            <span>{self._format_duration(metrics.elapsed_time)}</span>
+        </div>
+        <div class="job-summary-row">
+            <span>Time Limit:</span>
+            <span>{self._format_duration(metrics.time_limit)} ({metrics.time_efficiency:.1f}% used)</span>
+        </div>
+        <div class="job-summary-row">
+            <span>Resources:</span>
+            <span>{metrics.num_nodes}N × {metrics.num_cpus}C{f' × {metrics.num_gpus}G' if metrics.has_gpus else ''}</span>
+        </div>
+    </div>
+    
+    <div class="efficiency-section">
+        <div class="efficiency-label">Final CPU Efficiency</div>
+        <div class="efficiency-row">
+            <span>Overall</span>
+            <span class="efficiency-value efficiency-{cpu_class}">{metrics.cpu_efficiency:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.cpu_efficiency, cpu_class)}
+    </div>
+    
+    <div class="efficiency-section">
+        <div class="efficiency-label">Final Memory Usage</div>
+        <div class="efficiency-row">
+            <span>Peak: {self._format_memory(metrics.memory_used_max)} / {self._format_memory(metrics.memory_requested)}</span>
+            <span class="efficiency-value efficiency-{mem_class}">{metrics.memory_efficiency:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.memory_efficiency, mem_class)}
+    </div>
+"""
+
+        if metrics.has_gpus:
+            gpu_class = self._get_efficiency_class(
+                metrics.gpu_utilization_avg, self.thresholds.gpu_good, self.thresholds.gpu_warning
+            )
+            html += f"""
+    <div class="efficiency-section">
+        <div class="efficiency-label">GPU Summary ({metrics.num_gpus} GPU{'s' if metrics.num_gpus > 1 else ''})</div>
+        <div class="efficiency-row">
+            <span>Average Utilization</span>
+            <span class="efficiency-value efficiency-{gpu_class}">{metrics.gpu_utilization_avg:.1f}%</span>
+        </div>
+        {self._generate_progress_bar(metrics.gpu_utilization_avg, gpu_class)}
+    </div>
+"""
+
+        if self.config.show_recommendations:
+            recommendations = self._generate_recommendations(metrics)
+            if recommendations:
+                html += """
+    <div class="recommendation">
+        <strong>Suggestions for Future Jobs:</strong><br>
+"""
+                for rec in recommendations:
+                    html += f"        {rec}<br>\n"
+                html += "    </div>\n"
+            elif metrics.cpu_efficiency > self.thresholds.cpu_good and metrics.memory_efficiency > self.thresholds.memory_warning:
+                html += """
+    <div class="recommendation good">
+        ✨ Great job! Resource utilization was efficient.
+    </div>
+"""
+
+        html += "</div>\n"
+        return html
+
+    def generate_card_html(self, metrics: JobMetrics) -> str:
+        """Generate appropriate HTML card based on job state."""
+        if metrics.state.is_completed:
+            return self.generate_completed_card_html(metrics)
+        else:
+            return self.generate_running_card_html(metrics)
+
+    def update_session_card(self, session_path: Path, metrics: JobMetrics) -> bool:
+        """Update the session card HTML file with job efficiency data."""
+        info_html_path = session_path / "info.html"
+        try:
+            new_content = self.generate_card_html(metrics)
+            with open(info_html_path, 'w') as f:
+                f.write(new_content)
+            logger.debug(f"Updated session card: {info_html_path}")
+            return True
+        except PermissionError:
+            logger.error(f"Permission denied writing to: {info_html_path}")
+            return False
+        except Exception as e:
+            logger.error(f"Error updating session card: {e}")
+            return False
+
+    def find_session_for_job(self, user: str, job_id: str) -> Optional[Path]:
+        """Find the OOD session directory for a given Slurm job."""
+        user_session_path = self.config.get_user_session_path(user)
+        if not user_session_path.exists():
+            logger.debug(f"User session path does not exist: {user_session_path}")
+            return None
+        for session_dir in user_session_path.iterdir():
+            if not session_dir.is_dir():
+                continue
+            job_id_file = session_dir / "job_id"
+            if job_id_file.exists():
+                try:
+                    with open(job_id_file, 'r') as f:
+                        stored_job_id = f.read().strip()
+                    if stored_job_id == job_id:
+                        return session_dir
+                except Exception as e:
+                    logger.debug(f"Error reading job_id file: {e}")
+                    continue
+        logger.debug(f"No session found for job {job_id}")
+        return None
+
+    def list_active_sessions(self, user: str) -> List[tuple]:
+        """List all active OOD sessions for a user."""
+        sessions = []
+        user_session_path = self.config.get_user_session_path(user)
+        if not user_session_path.exists():
+            return sessions
+        for session_dir in user_session_path.iterdir():
+            if not session_dir.is_dir():
+                continue
+            job_id_file = session_dir / "job_id"
+            if job_id_file.exists():
+                try:
+                    with open(job_id_file, 'r') as f:
+                        job_id = f.read().strip()
+                    sessions.append((session_dir, job_id))
+                except Exception:
+                    continue
+        return sessions
+
+
+# =============================================================================
+# CLI Commands
+# =============================================================================
+
+def setup_logging(verbose: bool = False, debug: bool = False) -> None:
+    """Configure logging based on command line options."""
+    if debug:
+        level = logging.DEBUG
+    elif verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+    logging.basicConfig(level=level, format='%(levelname)s: %(message)s')
+
+
+def _make_bar(value: float, width: int = 20) -> str:
+    """Create a simple ASCII progress bar."""
+    value = max(0, min(100, value))
+    filled = int(width * value / 100)
+    empty = width - filled
+    return f"[{'█' * filled}{'░' * empty}]"
+
+
+def _get_recommendations(metrics: JobMetrics, config: Config) -> List[str]:
+    """Generate efficiency recommendations."""
+    recs = []
+    thresholds = config.thresholds
+    if metrics.cpu_efficiency < thresholds.cpu_warning and metrics.cpu_efficiency > 0:
+        recs.append(f"Low CPU efficiency ({metrics.cpu_efficiency:.0f}%). Consider requesting fewer CPUs.")
+    if metrics.memory_efficiency < thresholds.memory_warning and metrics.memory_efficiency > 0:
+        recs.append(f"Low memory usage ({metrics.memory_efficiency:.0f}%). Consider requesting less memory.")
+    elif metrics.memory_efficiency > 95:
+        recs.append(f"High memory usage ({metrics.memory_efficiency:.0f}%). Consider requesting more memory.")
+    if metrics.has_gpus and metrics.gpu_utilization_avg < thresholds.gpu_warning and metrics.gpu_utilization_avg > 0:
+        recs.append(f"Low GPU utilization ({metrics.gpu_utilization_avg:.0f}%). Ensure code is GPU-optimized.")
+    if metrics.state.is_completed and metrics.time_efficiency < 25:
+        recs.append(f"Only used {metrics.time_efficiency:.0f}% of time limit. Request less time for faster scheduling.")
+    return recs
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show efficiency status of a job."""
+    config = load_config(args.config)
+    job_stats = JobStats(config)
+    metrics = job_stats.get_job_stats(args.job_id)
+
+    if metrics is None:
+        print(f"Error: Could not get status for job {args.job_id}", file=sys.stderr)
+        return 1
+
+    print(f"\n{'='*50}")
+    print(f"Job {metrics.job_id}: {metrics.job_name or 'N/A'}")
+    print(f"{'='*50}")
+    print(f"User:       {metrics.user}")
+    print(f"State:      {metrics.state.value}")
+    print(f"Partition:  {metrics.partition}")
+
+    print(f"\n--- Resources ---")
+    print(f"Nodes:      {metrics.num_nodes}")
+    print(f"CPUs:       {metrics.num_cpus}")
+    if metrics.has_gpus:
+        print(f"GPUs:       {metrics.num_gpus}")
+    print(f"Memory:     {metrics.memory_requested_gb:.1f} GB requested")
+
+    print(f"\n--- Efficiency ---")
+    cpu_bar = _make_bar(metrics.cpu_efficiency)
+    mem_bar = _make_bar(metrics.memory_efficiency)
+    print(f"CPU:        {cpu_bar} {metrics.cpu_efficiency:5.1f}%")
+    print(f"Memory:     {mem_bar} {metrics.memory_efficiency:5.1f}% (peak: {metrics.memory_used_max_gb:.1f} GB)")
+    if metrics.has_gpus:
+        gpu_bar = _make_bar(metrics.gpu_utilization_avg)
+        print(f"GPU:        {gpu_bar} {metrics.gpu_utilization_avg:5.1f}%")
+
+    print(f"\n--- Time ---")
+    elapsed = str(metrics.elapsed_time).split('.')[0]
+    limit = str(metrics.time_limit).split('.')[0]
+    time_bar = _make_bar(metrics.time_efficiency)
+    print(f"Elapsed:    {elapsed}")
+    print(f"Limit:      {limit}")
+    print(f"Used:       {time_bar} {metrics.time_efficiency:5.1f}%")
+
+    recommendations = _get_recommendations(metrics, config)
+    if recommendations:
+        print(f"\n--- Recommendations ---")
+        for rec in recommendations:
+            print(f"  • {rec}")
+
+    print()
+
+    if args.json:
+        data = {
+            'job_id': metrics.job_id,
+            'job_name': metrics.job_name,
+            'user': metrics.user,
+            'state': metrics.state.value,
+            'partition': metrics.partition,
+            'num_nodes': metrics.num_nodes,
+            'num_cpus': metrics.num_cpus,
+            'num_gpus': metrics.num_gpus,
+            'memory_requested_gb': metrics.memory_requested_gb,
+            'memory_used_max_gb': metrics.memory_used_max_gb,
+            'cpu_efficiency': metrics.cpu_efficiency,
+            'memory_efficiency': metrics.memory_efficiency,
+            'gpu_utilization': metrics.gpu_utilization_avg if metrics.has_gpus else None,
+            'elapsed_seconds': metrics.elapsed_seconds,
+            'time_limit_seconds': metrics.time_limit_seconds,
+            'time_efficiency': metrics.time_efficiency,
+        }
+        print("JSON:")
+        print(json.dumps(data, indent=2))
+
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Update OOD session card for a job."""
+    config = load_config(args.config)
+    job_stats = JobStats(config)
+    card_updater = SessionCardUpdater(config)
+    metrics = job_stats.get_job_stats(args.job_id)
+
+    if metrics is None:
+        print(f"Error: Could not get metrics for job {args.job_id}", file=sys.stderr)
+        return 1
+
+    if args.session_path:
+        session_path = Path(args.session_path)
+    else:
+        user = args.user or metrics.user
+        session_path = card_updater.find_session_for_job(user, args.job_id)
+        if session_path is None:
+            print(f"Error: Could not find OOD session for job {args.job_id}", file=sys.stderr)
+            print("Use --session-path to specify the session directory", file=sys.stderr)
+            return 1
+
+    success = card_updater.update_session_card(session_path, metrics)
+    if success:
+        print(f"Updated session card: {session_path / 'info.html'}")
+        return 0
+    else:
+        print("Error: Failed to update session card", file=sys.stderr)
+        return 1
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """List active OOD sessions."""
+    config = load_config(args.config)
+    card_updater = SessionCardUpdater(config)
+    job_stats = JobStats(config)
+    username = args.user or pwd.getpwuid(os.getuid()).pw_name
+    sessions = card_updater.list_active_sessions(username)
+
+    if not sessions:
+        print(f"No active OOD sessions found for user {username}")
+        return 0
+
+    print(f"\nActive Sessions for {username}")
+    print(f"{'Job ID':<12} {'State':<12} {'CPU %':<8} {'Mem %':<8} {'Session'}")
+    print("-" * 60)
+
+    for session_path, job_id in sessions:
+        metrics = job_stats.get_job_stats(job_id)
+        if metrics:
+            state = metrics.state.value[:10]
+            cpu = f"{metrics.cpu_efficiency:.1f}" if metrics.cpu_efficiency > 0 else "-"
+            mem = f"{metrics.memory_efficiency:.1f}" if metrics.memory_efficiency > 0 else "-"
+        else:
+            state = "UNKNOWN"
+            cpu = "-"
+            mem = "-"
+        print(f"{job_id:<12} {state:<12} {cpu:<8} {mem:<8} {session_path.name}")
+
+    print()
+    return 0
+
+
+def cmd_html(args: argparse.Namespace) -> int:
+    """Generate HTML card for a job."""
+    config = load_config(args.config)
+    job_stats = JobStats(config)
+    card_updater = SessionCardUpdater(config)
+    metrics = job_stats.get_job_stats(args.job_id)
+
+    if metrics is None:
+        print(f"Error: Could not get metrics for job {args.job_id}", file=sys.stderr)
+        return 1
+
+    html = card_updater.generate_card_html(metrics)
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(html)
+        print(f"HTML written to {args.output}")
+    else:
+        print(html)
+
+    return 0
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create the argument parser."""
+    parser = argparse.ArgumentParser(
+        prog='schmutz',
+        description='Display Slurm job efficiency metrics (like jobstats/jobperf)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  schmutz 12345              Show efficiency for job 12345
+  schmutz status 12345       Same as above
+  schmutz update 12345       Update OOD session card for job
+  schmutz list               List active OOD sessions
+  schmutz html 12345         Output HTML card to stdout
+"""
+    )
+
+    parser.add_argument('--version', '-V', action='version', version=f'%(prog)s {__version__}')
+    parser.add_argument('--config', '-c', help='Path to configuration file')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose output')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output')
+
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+
+    status_parser = subparsers.add_parser('status', help='Show job efficiency status')
+    status_parser.add_argument('job_id', help='Slurm job ID')
+    status_parser.add_argument('--json', '-j', action='store_true', help='Output JSON')
+    status_parser.set_defaults(func=cmd_status)
+
+    update_parser = subparsers.add_parser('update', help='Update OOD session card')
+    update_parser.add_argument('job_id', help='Slurm job ID')
+    update_parser.add_argument('--session-path', '-s', help='Path to OOD session directory')
+    update_parser.add_argument('--user', '-u', help='Username for finding session')
+    update_parser.set_defaults(func=cmd_update)
+
+    list_parser = subparsers.add_parser('list', help='List active OOD sessions')
+    list_parser.add_argument('--user', '-u', help='User to list sessions for')
+    list_parser.set_defaults(func=cmd_list)
+
+    html_parser = subparsers.add_parser('html', help='Generate HTML card')
+    html_parser.add_argument('job_id', help='Slurm job ID')
+    html_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    html_parser.set_defaults(func=cmd_html)
+
+    parser.add_argument('job_id', nargs='?', help='Slurm job ID (shortcut for status)')
+    parser.add_argument('--json', '-j', action='store_true', help='Output JSON (with job_id)')
+
+    return parser
+
+
+def main() -> int:
+    """Main entry point."""
+    parser = create_parser()
+    args = parser.parse_args()
+
+    setup_logging(verbose=args.verbose, debug=args.debug)
+
+    if args.command is None and args.job_id:
+        args.command = 'status'
+        args.func = cmd_status
+        return args.func(args)
+
+    if args.command is None:
+        parser.print_help()
+        return 0
+
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
