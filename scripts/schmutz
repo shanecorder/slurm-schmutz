@@ -62,13 +62,29 @@ class EfficiencyThresholds:
     gpu_memory_warning: float = 25.0
 
 
+def _find_command(name: str) -> str:
+    """Find command path, checking common locations."""
+    import shutil
+    # Try to find in PATH first
+    path = shutil.which(name)
+    if path:
+        return path
+    # Check common locations
+    for prefix in ['/usr/bin', '/usr/local/bin', '/opt/slurm/bin', '/cm/shared/apps/slurm/current/bin']:
+        candidate = f"{prefix}/{name}"
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # Fallback to just the command name (rely on PATH at runtime)
+    return name
+
+
 @dataclass
 class SlurmConfig:
     """Slurm-related configuration."""
-    sstat_path: str = "/usr/bin/sstat"
-    sacct_path: str = "/usr/bin/sacct"
-    squeue_path: str = "/usr/bin/squeue"
-    scontrol_path: str = "/usr/bin/scontrol"
+    sstat_path: str = field(default_factory=lambda: _find_command('sstat'))
+    sacct_path: str = field(default_factory=lambda: _find_command('sacct'))
+    squeue_path: str = field(default_factory=lambda: _find_command('squeue'))
+    scontrol_path: str = field(default_factory=lambda: _find_command('scontrol'))
     command_timeout: int = 30
 
 
@@ -110,12 +126,15 @@ class Config:
         """Create configuration from a dictionary."""
         thresholds_data = data.pop('thresholds', {})
         slurm_data = data.pop('slurm', {})
+        # Filter out None values to preserve defaults
+        thresholds_data = {k: v for k, v in thresholds_data.items() if v is not None}
+        slurm_data = {k: v for k, v in slurm_data.items() if v is not None}
         thresholds = EfficiencyThresholds(**thresholds_data) if thresholds_data else EfficiencyThresholds()
         slurm = SlurmConfig(**slurm_data) if slurm_data else SlurmConfig()
         return cls(
             thresholds=thresholds,
             slurm=slurm,
-            **{k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+            **{k: v for k, v in data.items() if k in cls.__dataclass_fields__ and v is not None}
         )
 
     def get_user_session_path(self, username: str) -> Path:
