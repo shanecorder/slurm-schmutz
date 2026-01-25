@@ -65,16 +65,31 @@ class EfficiencyThresholds:
 def _find_command(name: str) -> str:
     """Find command path, checking common locations."""
     import shutil
-    # Try to find in PATH first
+    
+    # Common Slurm installation paths (checked in order)
+    common_paths = [
+        '/usr/bin',
+        '/usr/local/bin', 
+        '/opt/slurm/bin',
+        '/cm/shared/apps/slurm/current/bin',
+        '/cm/local/apps/slurm/current/bin',
+        '/apps/slurm/bin',
+        '/usr/local/slurm/bin',
+        '/opt/ohpc/pub/slurm/bin',
+    ]
+    
+    # Check common locations first (more reliable than user's potentially modified PATH)
+    for prefix in common_paths:
+        candidate = os.path.join(prefix, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    
+    # Try to find in PATH as fallback
     path = shutil.which(name)
     if path:
         return path
-    # Check common locations
-    for prefix in ['/usr/bin', '/usr/local/bin', '/opt/slurm/bin', '/cm/shared/apps/slurm/current/bin']:
-        candidate = f"{prefix}/{name}"
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    # Fallback to just the command name (rely on PATH at runtime)
+    
+    # Last resort: return the bare command name and hope it's in PATH at runtime
     return name
 
 
@@ -86,6 +101,17 @@ class SlurmConfig:
     squeue_path: str = field(default_factory=lambda: _find_command('squeue'))
     scontrol_path: str = field(default_factory=lambda: _find_command('scontrol'))
     command_timeout: int = 30
+    
+    def __post_init__(self):
+        """Ensure all paths are valid strings, not None."""
+        if not self.sstat_path:
+            self.sstat_path = _find_command('sstat')
+        if not self.sacct_path:
+            self.sacct_path = _find_command('sacct')
+        if not self.squeue_path:
+            self.squeue_path = _find_command('squeue')
+        if not self.scontrol_path:
+            self.scontrol_path = _find_command('scontrol')
 
 
 @dataclass
@@ -302,6 +328,17 @@ class JobStats:
     def _run_command(self, cmd: List[str], timeout: Optional[int] = None) -> Tuple[str, str, int]:
         """Run a shell command and return output."""
         timeout = timeout or self.slurm.command_timeout
+        
+        # Validate command list - convert all elements to strings and check for None
+        try:
+            cmd = [str(c) if c is not None else '' for c in cmd]
+            if not cmd or not cmd[0]:
+                logger.error("Empty or invalid command")
+                return "", "Empty or invalid command", -1
+        except (TypeError, ValueError) as e:
+            logger.error(f"Invalid command format: {e}")
+            return "", f"Invalid command format: {e}", -1
+        
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             return result.stdout, result.stderr, result.returncode
