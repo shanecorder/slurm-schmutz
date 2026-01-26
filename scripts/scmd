@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# ============================================================
+#  scmd — Interactive Slurm Command Reference (Categories + Fuzzy Search)
+#  Explore, browse, or search all Slurm commands with color output.
+# ============================================================
+
+# ---------- Colors ----------
+CYAN="\033[36m"
+YELLOW="\033[33m"
+GREEN="\033[32m"
+BOLD="\033[1m"
+RESET="\033[0m"
+PURPLE="\033[35m"
+
+# ---------- Command Data ----------
+declare -A DESC EXAMPLES TIPS CAT
+
+# --- Submission ---
+CAT["sbatch"]="Submission"
+DESC["sbatch"]="Submit a batch job script to the scheduler."
+EXAMPLES["sbatch"]="sbatch job.slurm\nsbatch --dependency=afterok:123456 next.slurm"
+TIPS["sbatch"]="--array=0-99 (arrays), --dependency for chaining, --parsable for script output."
+
+CAT["salloc"]="Submission"
+DESC["salloc"]="Request an interactive job allocation."
+EXAMPLES["salloc"]="salloc -N 2 -n 8 bash\nsalloc --x11 --mem=8G"
+TIPS["salloc"]="Use for lightweight interactive debugging or GUI apps."
+
+CAT["srun"]="Submission"
+DESC["srun"]="Launch tasks interactively or within job allocations."
+EXAMPLES["srun"]="srun -n 4 ./app\nsrun --pty bash"
+TIPS["srun"]="--label shows rank IDs, --ntasks-per-node to control distribution."
+
+CAT["scrun"]="Submission"
+DESC["scrun"]="Cray/cluster wrapper for srun."
+EXAMPLES["scrun"]="scrun -n 16 ./app"
+TIPS["scrun"]="Auto‑configures topology and I/O on some HPC systems."
+
+# --- Job Control ---
+CAT["squeue"]="Control"
+DESC["squeue"]="List queued / running jobs and their states."
+EXAMPLES["squeue"]="squeue -u $USER\nsqueue -o \"%10i %9P %j %2t %8M %R\""
+TIPS["squeue"]="--states=R,PD filters jobs; --sort=-t sorts by state."
+
+CAT["scancel"]="Control"
+DESC["scancel"]="Cancel queued or running jobs."
+EXAMPLES["scancel"]="scancel 12345\nscancel --user=bob"
+TIPS["scancel"]="--name=pattern cancels by job name; --signal=SIGTERM for custom signal."
+
+CAT["scontrol"]="Control"
+DESC["scontrol"]="Query or update Slurm objects (jobs, nodes, partitions)."
+EXAMPLES["scontrol"]="scontrol show job 1234\nscontrol update jobid=1234 TimeLimit=+01:00"
+TIPS["scontrol"]="Hold/release jobs, extend time limits, or view configuration."
+
+CAT["sattach"]="Control"
+DESC["sattach"]="Attach to a running job’s I/O streams."
+EXAMPLES["sattach"]="sattach 6789.0"
+TIPS["sattach"]="Attach interactively to MPI rank 0; great for live debugging."
+
+CAT["strigger"]="Control"
+DESC["strigger"]="Set up triggers on cluster/job events."
+EXAMPLES["strigger"]="strigger --set --jobid=1234 --fini --program=/path/script.sh"
+TIPS["strigger"]="Automate cleanup, alerts, or chained workflow actions."
+
+CAT["scrontab"]="Control"
+DESC["scrontab"]="Schedule recurring Slurm jobs like cron."
+EXAMPLES["scrontab"]="scrontab -e"
+TIPS["scrontab"]="Perfect for periodic data processing or maintenance jobs."
+
+# --- Monitoring ---
+CAT["sacct"]="Monitoring"
+DESC["sacct"]="Show accounting data for completed jobs."
+EXAMPLES["sacct"]="sacct -u $USER --format=JobID,AllocCPUS,Elapsed,MaxRSS"
+TIPS["sacct"]="--allocations hides steps; --starttime, --endtime limit time range."
+
+CAT["sstat"]="Monitoring"
+DESC["sstat"]="Show runtime stats for live jobs/steps."
+EXAMPLES["sstat"]="sstat -j 5678 --format=AveCPU,AveRSS"
+TIPS["sstat"]="Useful for live performance checks."
+
+CAT["seff"]="Monitoring"
+DESC["seff"]="Summarize resource efficiency of completed jobs."
+EXAMPLES["seff"]="seff 56789"
+TIPS["seff"]="Highlights CPU/GPU utilization and memory efficiency."
+
+CAT["sprio"]="Monitoring"
+DESC["sprio"]="Show job scheduling priorities and contributing factors."
+EXAMPLES["sprio"]="sprio -u $USER"
+TIPS["sprio"]="-l lists fairness, age, partition, and job size weights."
+
+CAT["sshare"]="Monitoring"
+DESC["sshare"]="Display fair-share usage by user/account."
+EXAMPLES["sshare"]="sshare -U"
+TIPS["sshare"]="--parsable2 outputs CSV; view user/service share delta."
+
+CAT["sjstat"]="Monitoring"
+DESC["sjstat"]="Monitor job/resource usage in near‑real time."
+EXAMPLES["sjstat"]="sjstat -j 1234 -r"
+TIPS["sjstat"]="-r refresh mode; great for live dashboards."
+
+CAT["sreport"]="Monitoring"
+DESC["sreport"]="Generate accounting summaries (cluster, user, job)."
+EXAMPLES["sreport"]="sreport cluster utilization start=2024-01-01 end=2024-12-31"
+TIPS["sreport"]="--tres=cpu,gpu restricts metrics; monthly/daily periods supported."
+
+CAT["sview"]="Monitoring"
+DESC["sview"]="GUI visualization for jobs, nodes, partitions."
+EXAMPLES["sview"]="sview"
+TIPS["sview"]="Interactive filters + color coding for node state."
+
+# --- Diagnostics ---
+CAT["sinfo"]="Diagnostics"
+DESC["sinfo"]="Show node and partition statuses."
+EXAMPLES["sinfo"]="sinfo -Nel"
+TIPS["sinfo"]="--state=down shows failed nodes; --format for custom columns."
+
+CAT["sdiag"]="Diagnostics"
+DESC["sdiag"]="Display scheduler diagnostics and timing information."
+EXAMPLES["sdiag"]="sdiag"
+TIPS["sdiag"]="Analyze queue depth, backfill efficiency, latency."
+
+CAT["sgather"]="Diagnostics"
+DESC["sgather"]="Collect job output/logs from all nodes."
+EXAMPLES["sgather"]="sgather 32145"
+TIPS["sgather"]="Simplifies collecting logs from multi‑node jobs."
+
+CAT["sjobexitmod"]="Diagnostics"
+DESC["sjobexitmod"]="Adjust job exit codes after completion (admin)."
+EXAMPLES["sjobexitmod"]="sjobexitmod 9876 0"
+TIPS["sjobexitmod"]="Used to correct accounting records post‑hoc."
+
+CAT["sh5util"]="Diagnostics"
+DESC["sh5util"]="Inspect slurm job profiling (HDF5 format)."
+EXAMPLES["sh5util"]="sh5util -j 1234 --summary"
+TIPS["sh5util"]="Great for in‑depth profiling analysis if enabled."
+
+CAT["sbcast"]="Diagnostics"
+DESC["sbcast"]="Broadcast files to all nodes in allocation."
+EXAMPLES["sbcast"]="sbcast ./input /tmp/input"
+TIPS["sbcast"]="Pre‑stage large datasets quickly into node scratch."
+
+# --- Administration ---
+CAT["sacctmgr"]="Admin"
+DESC["sacctmgr"]="Manage accounts, associations, and QoS."
+EXAMPLES["sacctmgr"]="sacctmgr show qos\nsacctmgr modify qos normal set Priority=10"
+TIPS["sacctmgr"]="Create, modify, or delete accounts interactively!"
+
+CAT["smail"]="Admin"
+DESC["smail"]="Send email notifications for job events."
+EXAMPLES["smail"]="smail -j 4321 -t 'Job done'"
+TIPS["smail"]="Handy for after‑the‑fact job notifications."
+
+# ---------- Categories ----------
+CATS=("Submission" "Control" "Monitoring" "Diagnostics" "Admin")
+
+# ---------- UI Functions ----------
+
+function show_title() {
+  clear
+  echo -e "${BOLD}${CYAN}🧭  Slurm Command Reference${RESET}"
+  echo -e "${YELLOW}Browse by category or type / to search.${RESET}\n"
+}
+
+function show_categories() {
+  show_title
+  for i in "${!CATS[@]}"; do
+    printf "  ${GREEN}%2d${RESET}) %s\n" "$((i+1))" "${CATS[$i]}"
+  done
+  echo -e "\n  ${PURPLE}/ <term>${RESET} - fuzzy search"
+  echo -e "  ${YELLOW}q${RESET} - quit\n"
+  read -rp "$(echo -e "${PURPLE}Choose option: ${RESET}")" choice
+  case "$choice" in
+    [Qq]) echo -e "\nGoodbye 👋"; exit 0 ;;
+    /*)   fuzzy_search "${choice#/}" ;;
+    [0-9]*) 
+      ((choice>=1 && choice<=${#CATS[@]})) && show_commands_in_cat "${CATS[$((choice-1))]}" ;;
+    *) echo -e "${YELLOW}Invalid input.${RESET}"; read -rp "Press Enter..." ;;
+  esac
+}
+
+function show_commands_in_cat() {
+  local cat="$1"
+  clear
+  echo -e "${BOLD}${CYAN}📂 Category: ${cat}${RESET}\n"
+  local cmds=()
+  for c in "${!CAT[@]}"; do [[ "${CAT[$c]}" == "$cat" ]] && cmds+=("$c"); done
+  IFS=$'\n' cmds=($(sort <<<"${cmds[*]}")); unset IFS
+
+  for i in "${!cmds[@]}"; do
+    printf "  ${GREEN}%2d${RESET}) ${cmds[$i]}\n" "$((i+1))"
+  done
+  echo -e "\n${YELLOW}b${RESET} - back    ${PURPLE}/ <term>${RESET} - search"
+  read -rp "$(echo -e "${PURPLE}Choose command: ${RESET}")" pick
+  case "$pick" in
+    [Bb]) return ;;
+    /*) fuzzy_search "${pick#/}" ;;
+    [0-9]*) 
+      ((pick>=1 && pick<=${#cmds[@]})) && show_command "${cmds[$((pick-1))]}" ;;
+    *) echo -e "${YELLOW}Invalid input.${RESET}"; read -rp "Press Enter..." ;;
+  esac
+}
+
+function show_command() {
+  local cmd="$1"
+  clear
+  echo -e "${BOLD}${CYAN}🔹 Command:${RESET} ${cmd}\n"
+  echo -e "${GREEN}${DESC[$cmd]}${RESET}\n"
+  echo -e "${BOLD}Example(s):${RESET}\n${EXAMPLES[$cmd]}\n"
+  echo -e "${YELLOW}💡 Tips:${RESET} ${TIPS[$cmd]}\n"
+  read -rp "Press Enter to return..."
+}
+
+function fuzzy_search() {
+  local term="$1"
+  clear
+  echo -e "${BOLD}${CYAN}🔍 Fuzzy Search:${RESET} '${term}'\n"
+  local results=()
+  for c in "${!DESC[@]}"; do
+    if [[ "$c" =~ $term || "${DESC[$c],,}" =~ ${term,,} ]]; then
+      results+=("$c")
+    fi
+  done
+  if ((${#results[@]} == 0)); then
+    echo -e "${YELLOW}No matches found.${RESET}"
+    read -rp "Press Enter..."
+    return
+  fi
+  IFS=$'\n' results=($(sort <<<"${results[*]}")); unset IFS
+  for i in "${!results[@]}"; do
+    printf "  ${GREEN}%2d${RESET}) %-12s  ${CYAN}%s${RESET}\n" \
+      "$((i+1))" "${results[$i]}" "${DESC[${results[$i]}]}"
+  done
+  echo -e "\n${YELLOW}b${RESET} - back"
+  read -rp "$(echo -e "${PURPLE}Select command: ${RESET}")" num
+  [[ "$num" =~ ^[Bb]$ ]] && return
+  if [[ "$num" =~ ^[0-9]+$ ]] && ((num>=1 && num<=${#results[@]})); then
+    show_command "${results[$((num-1))]}"
+  fi
+}
+
+# ---------- Main Loop ----------
+while true; do
+  show_categories
+done
