@@ -83,6 +83,11 @@ DESC["seff"]="Summarize resource efficiency of completed jobs."
 EXAMPLES["seff"]="seff 56789"
 TIPS["seff"]="Highlights CPU/GPU utilization and memory efficiency."
 
+CAT["schmutz"]="Monitoring"
+DESC["schmutz"]="Display job efficiency metrics and update OOD session cards."
+EXAMPLES["schmutz"]="schmutz 12345\nschmutz status 12345 --output json"
+TIPS["schmutz"]="Shows CPU/memory/GPU utilization; --session-path updates Open OnDemand cards."
+
 CAT["sprio"]="Monitoring"
 DESC["sprio"]="Show job scheduling priorities and contributing factors."
 EXAMPLES["sprio"]="sprio -u $USER"
