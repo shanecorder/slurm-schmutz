@@ -1367,7 +1367,7 @@ def _calculate_report_stats(
     
     # Sort low efficiency jobs by waste
     stats.low_efficiency_jobs.sort(key=lambda x: x['cpu_hours_wasted'], reverse=True)
-    stats.low_efficiency_jobs = stats.low_efficiency_jobs[:20]  # Top 20
+    stats.low_efficiency_jobs = stats.low_efficiency_jobs[:10]  # Top 10
     
     return stats
 
@@ -1419,21 +1419,9 @@ def _format_report_text(stats: ReportStats, title: str) -> str:
             lines.append(f"  {part:<20} {count:>6}")
         lines.append("")
     
-    # Top users by job count
-    if stats.jobs_by_user:
-        lines.append("TOP USERS (by job count)")
-        lines.append("-" * 40)
-        lines.append(f"  {'User':<15} {'Jobs':>6}  {'Avg CPU':>8}  {'Avg Mem':>8}")
-        for user, count in sorted(stats.jobs_by_user.items(), key=lambda x: -x[1])[:10]:
-            user_eff = stats.efficiency_by_user.get(user, {})
-            avg_cpu = user_eff.get('avg_cpu', 0)
-            avg_mem = user_eff.get('avg_mem', 0)
-            lines.append(f"  {user:<15} {count:>6}  {avg_cpu:>7.1f}%  {avg_mem:>7.1f}%")
-        lines.append("")
-    
     # Low efficiency jobs
     if stats.low_efficiency_jobs:
-        lines.append("LOW EFFICIENCY JOBS (top 20 by CPU hours wasted)")
+        lines.append("LOW EFFICIENCY JOBS (top 10 by CPU hours wasted)")
         lines.append("-" * 40)
         lines.append(f"  {'JobID':<12} {'User':<12} {'CPU Eff':>8} {'Wasted Hrs':>12}")
         for job in stats.low_efficiency_jobs:
@@ -1442,6 +1430,30 @@ def _format_report_text(stats: ReportStats, title: str) -> str:
                 f"{job['cpu_efficiency']:>7.1f}% {job['cpu_hours_wasted']:>11.1f}"
             )
         lines.append("")
+    
+    # Recommendations
+    lines.append("RECOMMENDATIONS")
+    lines.append("-" * 40)
+    recs = []
+    if stats.overall_cpu_efficiency < 50:
+        recs.append("• Overall CPU efficiency is low. Encourage users to request fewer CPUs or optimize code for parallelism.")
+    if stats.overall_memory_efficiency < 40:
+        recs.append("• Overall memory efficiency is low. Users may be over-requesting memory.")
+    if stats.cpu_waste_hours > 1000:
+        recs.append(f"• {stats.cpu_waste_hours:,.0f} CPU hours wasted this period. Consider user training on resource estimation.")
+    if stats.failed_jobs > stats.total_jobs * 0.1:
+        failure_pct = (stats.failed_jobs / stats.total_jobs * 100) if stats.total_jobs > 0 else 0
+        recs.append(f"• High failure rate ({failure_pct:.1f}%). Investigate common failure causes.")
+    if stats.cancelled_jobs > stats.total_jobs * 0.15:
+        cancel_pct = (stats.cancelled_jobs / stats.total_jobs * 100) if stats.total_jobs > 0 else 0
+        recs.append(f"• High cancellation rate ({cancel_pct:.1f}%). Users may need help with job time estimation.")
+    if stats.low_efficiency_jobs:
+        recs.append(f"• Contact users with consistently low-efficiency jobs for targeted assistance.")
+    if not recs:
+        recs.append("• Resource utilization looks healthy. Keep up the good work!")
+    for rec in recs:
+        lines.append(rec)
+    lines.append("")
     
     return "\n".join(lines)
 
@@ -1642,32 +1654,11 @@ def _format_report_html(stats: ReportStats, title: str) -> str:
     </div>
 """
     
-    # Top users table
-    if stats.jobs_by_user:
-        html += """
-    <div class="card">
-        <h2>Top Users</h2>
-        <table>
-            <thead>
-                <tr><th>User</th><th>Jobs</th><th>Avg CPU Eff</th><th>Avg Mem Eff</th></tr>
-            </thead>
-            <tbody>
-"""
-        for user, count in sorted(stats.jobs_by_user.items(), key=lambda x: -x[1])[:15]:
-            user_eff = stats.efficiency_by_user.get(user, {})
-            avg_cpu = user_eff.get('avg_cpu', 0)
-            avg_mem = user_eff.get('avg_mem', 0)
-            html += f"            <tr><td>{user}</td><td>{count}</td><td>{avg_cpu:.1f}%</td><td>{avg_mem:.1f}%</td></tr>\n"
-        html += """            </tbody>
-        </table>
-    </div>
-"""
-    
     # Low efficiency jobs
     if stats.low_efficiency_jobs:
         html += """
     <div class="card">
-        <h2>Low Efficiency Jobs (Top 20)</h2>
+        <h2>Low Efficiency Jobs (Top 10)</h2>
         <table>
             <thead>
                 <tr><th>Job ID</th><th>User</th><th>CPU Efficiency</th><th>CPU Hours Wasted</th></tr>
@@ -1678,6 +1669,35 @@ def _format_report_html(stats: ReportStats, title: str) -> str:
             html += f"            <tr><td>{job['job_id']}</td><td>{job['user']}</td><td>{job['cpu_efficiency']:.1f}%</td><td>{job['cpu_hours_wasted']:.1f}</td></tr>\n"
         html += """            </tbody>
         </table>
+    </div>
+"""
+    
+    # Recommendations
+    html += """
+    <div class="card">
+        <h2>Recommendations</h2>
+        <ul style="line-height: 1.8; color: #333;">
+"""
+    recs = []
+    if stats.overall_cpu_efficiency < 50:
+        recs.append("Overall CPU efficiency is low. Encourage users to request fewer CPUs or optimize code for parallelism.")
+    if stats.overall_memory_efficiency < 40:
+        recs.append("Overall memory efficiency is low. Users may be over-requesting memory.")
+    if stats.cpu_waste_hours > 1000:
+        recs.append(f"{stats.cpu_waste_hours:,.0f} CPU hours wasted this period. Consider user training on resource estimation.")
+    if stats.failed_jobs > stats.total_jobs * 0.1:
+        failure_pct = (stats.failed_jobs / stats.total_jobs * 100) if stats.total_jobs > 0 else 0
+        recs.append(f"High failure rate ({failure_pct:.1f}%). Investigate common failure causes.")
+    if stats.cancelled_jobs > stats.total_jobs * 0.15:
+        cancel_pct = (stats.cancelled_jobs / stats.total_jobs * 100) if stats.total_jobs > 0 else 0
+        recs.append(f"High cancellation rate ({cancel_pct:.1f}%). Users may need help with job time estimation.")
+    if stats.low_efficiency_jobs:
+        recs.append("Contact users with consistently low-efficiency jobs for targeted assistance.")
+    if not recs:
+        recs.append("Resource utilization looks healthy. Keep up the good work!")
+    for rec in recs:
+        html += f"            <li>{rec}</li>\n"
+    html += """        </ul>
     </div>
 """
     
