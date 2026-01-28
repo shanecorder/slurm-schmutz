@@ -1195,46 +1195,51 @@ def _query_jobs_for_report(
         return []
     
     # Second query: get MaxRSS and TotalCPU from job steps (batch step has the real data)
-    # Query all steps for the jobs we found
-    job_ids = ','.join(jobs.keys())
-    cmd2 = [
-        slurm.sacct_path,
-        "-j", job_ids,
-        "--noheader", "-P",
-        "-o", "JobID,MaxRSS,TotalCPU"
-    ]
+    # Batch job IDs to avoid "Argument list too long" error with many jobs
+    job_id_list = list(jobs.keys())
+    batch_size = 500  # Process 500 jobs at a time
     
-    try:
-        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=120)
-        if result2.returncode == 0:
-            for line in result2.stdout.strip().split('\n'):
-                if not line:
-                    continue
-                parts = line.split('|')
-                if len(parts) < 3:
-                    continue
-                
-                step_id = parts[0]
-                maxrss = parts[1]
-                totalcpu = parts[2]
-                
-                # Extract base job ID (handle "12345.batch" -> "12345")
-                base_job_id = step_id.split('.')[0]
-                
-                if base_job_id in jobs:
-                    # Prefer .batch step data, but take any non-empty values
-                    # .batch step typically has the most accurate resource usage
-                    if '.batch' in step_id:
-                        if maxrss:
+    for i in range(0, len(job_id_list), batch_size):
+        batch = job_id_list[i:i + batch_size]
+        job_ids = ','.join(batch)
+        cmd2 = [
+            slurm.sacct_path,
+            "-j", job_ids,
+            "--noheader", "-P",
+            "-o", "JobID,MaxRSS,TotalCPU"
+        ]
+        
+        try:
+            result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=120)
+            if result2.returncode == 0:
+                for line in result2.stdout.strip().split('\n'):
+                    if not line:
+                        continue
+                    parts = line.split('|')
+                    if len(parts) < 3:
+                        continue
+                    
+                    step_id = parts[0]
+                    maxrss = parts[1]
+                    totalcpu = parts[2]
+                    
+                    # Extract base job ID (handle "12345.batch" -> "12345")
+                    base_job_id = step_id.split('.')[0]
+                    
+                    if base_job_id in jobs:
+                        # Prefer .batch step data, but take any non-empty values
+                        # .batch step typically has the most accurate resource usage
+                        if '.batch' in step_id:
+                            if maxrss:
+                                jobs[base_job_id]['maxrss'] = maxrss
+                            if totalcpu:
+                                jobs[base_job_id]['totalcpu'] = totalcpu
+                        elif not jobs[base_job_id]['maxrss'] and maxrss:
                             jobs[base_job_id]['maxrss'] = maxrss
-                        if totalcpu:
+                        elif not jobs[base_job_id]['totalcpu'] and totalcpu:
                             jobs[base_job_id]['totalcpu'] = totalcpu
-                    elif not jobs[base_job_id]['maxrss'] and maxrss:
-                        jobs[base_job_id]['maxrss'] = maxrss
-                    elif not jobs[base_job_id]['totalcpu'] and totalcpu:
-                        jobs[base_job_id]['totalcpu'] = totalcpu
-    except Exception as e:
-        logger.warning(f"Could not get job step details: {e}")
+        except Exception as e:
+            logger.warning(f"Could not get job step details for batch {i//batch_size + 1}: {e}")
     
     return list(jobs.values())
 
@@ -1893,15 +1898,8 @@ def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: s
     lines.append("-" * 85)
     
     for rank, entry in enumerate(leaderboard, 1):
-        # Add medal for top 3 (use text indicators for alignment)
-        if rank == 1:
-            rank_str = "[1st]"
-        elif rank == 2:
-            rank_str = "[2nd]"
-        elif rank == 3:
-            rank_str = "[3rd]"
-        else:
-            rank_str = f" {rank}"
+        # Plain number ranking
+        rank_str = f"{rank:>4}"
         
         lines.append(
             f"{rank_str:<8} {entry['user']:<15} {entry['jobs']:>6} "
