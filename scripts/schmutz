@@ -6,7 +6,7 @@ A standalone CLI utility for displaying Slurm job efficiency metrics,
 inspired by jobstats and jobperf from Clemson University.
 
 This is a self-contained script with no external dependencies beyond
-Python 3.8+ standard library. PyYAML is optional for config file support.
+Python 3.7+ standard library. PyYAML is optional for config file support.
 
 Usage:
     schmutz <job_id>           Show efficiency for a job
@@ -19,7 +19,17 @@ Drop this file into a shared location (e.g., /opt/slurm/bin/schmutz),
 make it executable (chmod +x), and all users can run it.
 """
 
-__version__ = "1.0.0"
+import sys
+
+# Version check - must be before other imports that require 3.7+
+if sys.version_info < (3, 7):
+    sys.exit(
+        f"Error: schmutz requires Python 3.7 or later.\n"
+        f"You are running Python {sys.version_info.major}.{sys.version_info.minor}.\n"
+        f"Try: module load python/3.8 (or similar) before running schmutz."
+    )
+
+__version__ = "1.0.1"
 
 import argparse
 import json
@@ -28,7 +38,6 @@ import os
 import pwd
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -1115,7 +1124,7 @@ def _query_jobs_for_report(
     account: Optional[str] = None,
     partition: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Query sacct for jobs within date range."""
+    """Query sacct for completed jobs within date range (excludes running jobs)."""
     slurm = config.slurm
     
     cmd = [
@@ -1124,6 +1133,8 @@ def _query_jobs_for_report(
         "--endtime", end_date,
         "--noheader", "-P",
         "--allocations",  # Only main job entries, not steps
+        # Exclude running/pending jobs - only include jobs that have finished
+        "--state", "COMPLETED,FAILED,CANCELLED,TIMEOUT,NODE_FAIL,OUT_OF_MEMORY,PREEMPTED,DEADLINE",
         "-o", "JobID,JobName,User,Account,State,Partition,Submit,Start,End,Elapsed,"
               "Timelimit,NNodes,NCPUs,ReqMem,MaxRSS,TotalCPU,AllocTRES,ExitCode"
     ]
@@ -1199,9 +1210,9 @@ def _calculate_report_stats(
         # Count by state
         if 'COMPLETED' in state:
             stats.completed_jobs += 1
-        elif 'FAILED' in state or 'NODE_FAIL' in state or 'TIMEOUT' in state:
+        elif state in ('FAILED', 'NODE_FAIL', 'TIMEOUT', 'OUT_OF_MEMORY', 'DEADLINE', 'BOOT_FAIL'):
             stats.failed_jobs += 1
-        elif 'CANCELLED' in state:
+        elif 'CANCELLED' in state or state == 'PREEMPTED':
             stats.cancelled_jobs += 1
         
         # Count by user/partition
