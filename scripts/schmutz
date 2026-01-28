@@ -1885,28 +1885,28 @@ def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: s
     """Format leaderboard as plain text."""
     lines = []
     lines.append("")
-    lines.append("=" * 78)
+    lines.append("=" * 85)
     lines.append(f"  Efficiency Leaderboard | {start_str} to {end_str} ({days} days)")
-    lines.append("=" * 78)
+    lines.append("=" * 85)
     lines.append("")
-    lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Eff':>9} {'Mem Eff':>9} {'Score':>8} {'Waste Hrs':>11}")
-    lines.append("-" * 78)
+    lines.append(f"{'Rank':<8} {'User':<15} {'Jobs':>6} {'CPU Eff':>10} {'Mem Eff':>10} {'Score':>10} {'Waste Hrs':>12}")
+    lines.append("-" * 85)
     
     for rank, entry in enumerate(leaderboard, 1):
-        # Add medal emoji for top 3
+        # Add medal for top 3 (use text indicators for alignment)
         if rank == 1:
-            rank_str = "\U0001F947 1"  # gold medal
+            rank_str = "[1st]"
         elif rank == 2:
-            rank_str = "\U0001F948 2"  # silver medal
+            rank_str = "[2nd]"
         elif rank == 3:
-            rank_str = "\U0001F949 3"  # bronze medal
+            rank_str = "[3rd]"
         else:
-            rank_str = f"   {rank}"
+            rank_str = f" {rank}"
         
         lines.append(
-            f"{rank_str:<6} {entry['user']:<15} {entry['jobs']:>6} "
-            f"{entry['avg_cpu_eff']:>8.1f}% {entry['avg_mem_eff']:>8.1f}% "
-            f"{entry['combined_score']:>7.1f}% {entry['cpu_waste']:>10.1f}"
+            f"{rank_str:<8} {entry['user']:<15} {entry['jobs']:>6} "
+            f"{entry['avg_cpu_eff']:>9.2f}% {entry['avg_mem_eff']:>9.2f}% "
+            f"{entry['combined_score']:>9.2f}% {entry['cpu_waste']:>11.1f}"
         )
     
     lines.append("")
@@ -1918,49 +1918,54 @@ def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: s
 
 
 def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
-    """Format leaderboard as HTML."""
+    """Format leaderboard as HTML with sortable columns."""
     html = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>Efficiency Leaderboard</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1000px; margin: 0 auto; }}
+        .container {{ max-width: 1100px; margin: 0 auto; }}
         h1 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
         .subtitle {{ color: #666; margin-bottom: 20px; }}
         table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }}
-        th {{ background: #007bff; color: white; padding: 12px 15px; text-align: left; font-weight: 600; }}
+        th {{ background: #007bff; color: white; padding: 12px 15px; text-align: left; font-weight: 600; cursor: pointer; user-select: none; position: relative; }}
+        th:hover {{ background: #0056b3; }}
+        th.sort-asc::after {{ content: ' \25B2'; font-size: 0.8em; }}
+        th.sort-desc::after {{ content: ' \25BC'; font-size: 0.8em; }}
         td {{ padding: 10px 15px; border-bottom: 1px solid #eee; }}
         tr:hover {{ background: #f8f9fa; }}
         tr:last-child td {{ border-bottom: none; }}
-        .rank {{ font-weight: bold; font-size: 1.1em; }}
+        .rank {{ font-weight: bold; font-size: 1.1em; white-space: nowrap; }}
         .rank-1 {{ color: #FFD700; }}
         .rank-2 {{ color: #C0C0C0; }}
         .rank-3 {{ color: #CD7F32; }}
-        .medal {{ font-size: 1.3em; }}
+        .medal {{ font-size: 1.2em; margin-right: 5px; }}
         .score {{ font-weight: bold; color: #007bff; }}
         .waste {{ color: #dc3545; }}
         .efficiency-good {{ color: #28a745; }}
         .efficiency-warning {{ color: #ffc107; }}
         .efficiency-danger {{ color: #dc3545; }}
         .footer {{ margin-top: 20px; color: #666; font-size: 0.9em; }}
+        .sort-hint {{ font-size: 0.85em; color: #888; margin-bottom: 10px; }}
     </style>
 </head>
 <body>
 <div class="container">
     <h1>\U0001F3C6 Efficiency Leaderboard</h1>
     <p class="subtitle">{start_str} to {end_str} ({days} days) | Score = 60% CPU + 40% Memory efficiency</p>
+    <p class="sort-hint">Click column headers to sort</p>
     
-    <table>
+    <table id="leaderboard">
         <thead>
             <tr>
-                <th>Rank</th>
-                <th>User</th>
-                <th>Jobs</th>
-                <th>CPU Efficiency</th>
-                <th>Memory Efficiency</th>
-                <th>Score</th>
-                <th>CPU Hours Wasted</th>
+                <th data-sort="rank" data-type="number">Rank</th>
+                <th data-sort="user" data-type="string">User</th>
+                <th data-sort="jobs" data-type="number">Jobs</th>
+                <th data-sort="cpu" data-type="number">CPU Efficiency</th>
+                <th data-sort="mem" data-type="number">Memory Efficiency</th>
+                <th data-sort="score" data-type="number">Score</th>
+                <th data-sort="waste" data-type="number">CPU Hours Wasted</th>
             </tr>
         </thead>
         <tbody>
@@ -1978,21 +1983,21 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
             medal = '<span class="medal">\U0001F949</span>'
             rank_class = 'rank-3'
         else:
-            medal = ''
+            medal = '<span class="medal" style="visibility:hidden;">\U0001F947</span>'
             rank_class = ''
         
         # Efficiency color coding
         cpu_class = 'efficiency-good' if entry['avg_cpu_eff'] >= 70 else 'efficiency-warning' if entry['avg_cpu_eff'] >= 40 else 'efficiency-danger'
         mem_class = 'efficiency-good' if entry['avg_mem_eff'] >= 60 else 'efficiency-warning' if entry['avg_mem_eff'] >= 30 else 'efficiency-danger'
         
-        html += f"""            <tr>
-                <td class="rank {rank_class}">{medal} {rank}</td>
+        html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-jobs="{entry['jobs']}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}" data-waste="{entry['cpu_waste']:.2f}">
+                <td class="rank {rank_class}">{medal}{rank}</td>
                 <td>{entry['user']}</td>
                 <td>{entry['jobs']}</td>
-                <td class="{cpu_class}">{entry['avg_cpu_eff']:.1f}%</td>
-                <td class="{mem_class}">{entry['avg_mem_eff']:.1f}%</td>
-                <td class="score">{entry['combined_score']:.1f}%</td>
-                <td class="waste">{entry['cpu_waste']:,.1f}</td>
+                <td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
+                <td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
+                <td class="score">{entry['combined_score']:.2f}%</td>
+                <td class="waste">{entry['cpu_waste']:,.2f}</td>
             </tr>
 """
     
@@ -2001,6 +2006,58 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     
     <p class="footer">Total users: {len(leaderboard)}</p>
 </div>
+
+<script>
+// Sortable table functionality
+document.addEventListener('DOMContentLoaded', function() {{
+    const table = document.getElementById('leaderboard');
+    const headers = table.querySelectorAll('th');
+    let currentSort = {{ column: null, direction: 'asc' }};
+    
+    headers.forEach(header => {{
+        header.addEventListener('click', function() {{
+            const sortKey = this.dataset.sort;
+            const sortType = this.dataset.type;
+            
+            // Toggle direction if same column
+            if (currentSort.column === sortKey) {{
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            }} else {{
+                currentSort.column = sortKey;
+                currentSort.direction = 'asc';
+            }}
+            
+            // Update header styling
+            headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+            this.classList.add(currentSort.direction === 'asc' ? 'sort-asc' : 'sort-desc');
+            
+            // Sort rows
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            
+            rows.sort((a, b) => {{
+                let aVal = a.dataset[sortKey];
+                let bVal = b.dataset[sortKey];
+                
+                if (sortType === 'number') {{
+                    aVal = parseFloat(aVal);
+                    bVal = parseFloat(bVal);
+                }} else {{
+                    aVal = aVal.toLowerCase();
+                    bVal = bVal.toLowerCase();
+                }}
+                
+                if (aVal < bVal) return currentSort.direction === 'asc' ? -1 : 1;
+                if (aVal > bVal) return currentSort.direction === 'asc' ? 1 : -1;
+                return 0;
+            }});
+            
+            // Re-append sorted rows
+            rows.forEach(row => tbody.appendChild(row));
+        }});
+    }});
+}});
+</script>
 </body>
 </html>
 """
