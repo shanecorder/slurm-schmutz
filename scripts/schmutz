@@ -2375,8 +2375,8 @@ Examples:
 
     # Leaderboard subcommand
     lb_parser = subparsers.add_parser('leaderboard', help='Rank users by efficiency')
-    lb_parser.add_argument('--days', '-d', type=int, default=7,
-                           help='Number of days to include (default: 7)')
+    lb_parser.add_argument('--days', '-d', type=int, default=1,
+                           help='Number of days to include (default: 1)')
     lb_parser.add_argument('--account', '-a', help='Filter by Slurm account')
     lb_parser.add_argument('--partition', '-p', help='Filter by partition')
     lb_parser.add_argument('--sort', '-s', choices=['efficiency', 'cpu', 'memory', 'jobs', 'waste'],
