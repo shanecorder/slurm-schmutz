@@ -1070,6 +1070,648 @@ def _get_recommendations(metrics: JobMetrics, config: Config) -> List[str]:
     return recs
 
 
+@dataclass
+class ReportStats:
+    """Aggregated statistics for a report."""
+    total_jobs: int = 0
+    completed_jobs: int = 0
+    failed_jobs: int = 0
+    cancelled_jobs: int = 0
+    total_cpu_hours_requested: float = 0.0
+    total_cpu_hours_used: float = 0.0
+    total_memory_gb_hours_requested: float = 0.0
+    total_memory_gb_hours_used: float = 0.0
+    total_gpu_hours_requested: float = 0.0
+    avg_cpu_efficiency: float = 0.0
+    avg_memory_efficiency: float = 0.0
+    avg_time_efficiency: float = 0.0
+    jobs_by_user: Dict[str, int] = field(default_factory=dict)
+    jobs_by_partition: Dict[str, int] = field(default_factory=dict)
+    efficiency_by_user: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    low_efficiency_jobs: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def cpu_waste_hours(self) -> float:
+        return self.total_cpu_hours_requested - self.total_cpu_hours_used
+
+    @property
+    def overall_cpu_efficiency(self) -> float:
+        if self.total_cpu_hours_requested > 0:
+            return (self.total_cpu_hours_used / self.total_cpu_hours_requested) * 100
+        return 0.0
+
+    @property
+    def overall_memory_efficiency(self) -> float:
+        if self.total_memory_gb_hours_requested > 0:
+            return (self.total_memory_gb_hours_used / self.total_memory_gb_hours_requested) * 100
+        return 0.0
+
+
+def _query_jobs_for_report(
+    config: Config,
+    start_date: str,
+    end_date: str,
+    user: Optional[str] = None,
+    account: Optional[str] = None,
+    partition: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Query sacct for jobs within date range."""
+    slurm = config.slurm
+    
+    cmd = [
+        slurm.sacct_path,
+        "--starttime", start_date,
+        "--endtime", end_date,
+        "--noheader", "-P",
+        "--allocations",  # Only main job entries, not steps
+        "-o", "JobID,JobName,User,Account,State,Partition,Submit,Start,End,Elapsed,"
+              "Timelimit,NNodes,NCPUs,ReqMem,MaxRSS,TotalCPU,AllocTRES,ExitCode"
+    ]
+    
+    if user:
+        cmd.extend(["--user", user])
+    if account:
+        cmd.extend(["--account", account])
+    if partition:
+        cmd.extend(["--partition", partition])
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.error(f"sacct failed: {result.stderr}")
+            return []
+    except Exception as e:
+        logger.error(f"Error running sacct: {e}")
+        return []
+    
+    jobs = []
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split('|')
+        if len(parts) < 18:
+            continue
+        
+        job = {
+            'job_id': parts[0],
+            'job_name': parts[1],
+            'user': parts[2],
+            'account': parts[3],
+            'state': parts[4],
+            'partition': parts[5],
+            'submit': parts[6],
+            'start': parts[7],
+            'end': parts[8],
+            'elapsed': parts[9],
+            'timelimit': parts[10],
+            'nodes': parts[11],
+            'cpus': parts[12],
+            'reqmem': parts[13],
+            'maxrss': parts[14],
+            'totalcpu': parts[15],
+            'alloctres': parts[16],
+            'exitcode': parts[17],
+        }
+        jobs.append(job)
+    
+    return jobs
+
+
+def _calculate_report_stats(
+    jobs: List[Dict[str, Any]],
+    config: Config,
+    low_efficiency_threshold: float = 25.0,
+) -> ReportStats:
+    """Calculate aggregated statistics from job list."""
+    stats = ReportStats()
+    job_stats_helper = JobStats(config)
+    
+    cpu_efficiencies = []
+    mem_efficiencies = []
+    time_efficiencies = []
+    
+    for job in jobs:
+        stats.total_jobs += 1
+        user = job['user']
+        partition = job['partition']
+        state = job['state'].split()[0]  # Handle "COMPLETED by ..." etc.
+        
+        # Count by state
+        if 'COMPLETED' in state:
+            stats.completed_jobs += 1
+        elif 'FAILED' in state or 'NODE_FAIL' in state or 'TIMEOUT' in state:
+            stats.failed_jobs += 1
+        elif 'CANCELLED' in state:
+            stats.cancelled_jobs += 1
+        
+        # Count by user/partition
+        stats.jobs_by_user[user] = stats.jobs_by_user.get(user, 0) + 1
+        stats.jobs_by_partition[partition] = stats.jobs_by_partition.get(partition, 0) + 1
+        
+        # Parse resources
+        try:
+            cpus = int(job['cpus']) if job['cpus'].isdigit() else 1
+        except:
+            cpus = 1
+        
+        elapsed = job_stats_helper._parse_time(job['elapsed'])
+        timelimit = job_stats_helper._parse_time(job['timelimit'])
+        elapsed_hours = elapsed.total_seconds() / 3600
+        timelimit_hours = timelimit.total_seconds() / 3600 if timelimit.total_seconds() > 0 else elapsed_hours
+        
+        # CPU hours
+        cpu_hours_requested = cpus * timelimit_hours
+        cpu_time = job_stats_helper._parse_cpu_time(job['totalcpu'])
+        cpu_hours_used = cpu_time / 3600
+        
+        stats.total_cpu_hours_requested += cpu_hours_requested
+        stats.total_cpu_hours_used += cpu_hours_used
+        
+        # Memory
+        reqmem_str = job['reqmem']
+        nodes = int(job['nodes']) if job['nodes'].isdigit() else 1
+        mem_multiplier = 1
+        if reqmem_str.endswith('n'):
+            mem_multiplier = nodes
+            reqmem_str = reqmem_str[:-1]
+        elif reqmem_str.endswith('c'):
+            mem_multiplier = cpus
+            reqmem_str = reqmem_str[:-1]
+        
+        mem_requested = job_stats_helper._parse_memory(reqmem_str) * mem_multiplier
+        mem_used = job_stats_helper._parse_memory(job['maxrss'])
+        
+        mem_gb_hours_requested = (mem_requested / (1024**3)) * elapsed_hours
+        mem_gb_hours_used = (mem_used / (1024**3)) * elapsed_hours
+        
+        stats.total_memory_gb_hours_requested += mem_gb_hours_requested
+        stats.total_memory_gb_hours_used += mem_gb_hours_used
+        
+        # GPUs
+        alloctres = job['alloctres']
+        if 'gpu' in alloctres.lower():
+            match = re.search(r'gpu[=:]?(\d+)', alloctres.lower())
+            if match:
+                gpu_count = int(match.group(1))
+                stats.total_gpu_hours_requested += gpu_count * elapsed_hours
+        
+        # Calculate efficiencies
+        cpu_eff = 0.0
+        if cpu_hours_requested > 0:
+            cpu_eff = (cpu_hours_used / cpu_hours_requested) * 100
+            cpu_eff = min(100.0, max(0.0, cpu_eff))
+            cpu_efficiencies.append(cpu_eff)
+        
+        mem_eff = 0.0
+        if mem_requested > 0:
+            mem_eff = (mem_used / mem_requested) * 100
+            mem_eff = min(100.0, max(0.0, mem_eff))
+            mem_efficiencies.append(mem_eff)
+        
+        time_eff = 0.0
+        if timelimit_hours > 0:
+            time_eff = (elapsed_hours / timelimit_hours) * 100
+            time_eff = min(100.0, max(0.0, time_eff))
+            time_efficiencies.append(time_eff)
+        
+        # Track per-user efficiency
+        if user not in stats.efficiency_by_user:
+            stats.efficiency_by_user[user] = {
+                'cpu_sum': 0.0, 'mem_sum': 0.0, 'count': 0
+            }
+        stats.efficiency_by_user[user]['cpu_sum'] += cpu_eff
+        stats.efficiency_by_user[user]['mem_sum'] += mem_eff
+        stats.efficiency_by_user[user]['count'] += 1
+        
+        # Track low efficiency jobs
+        if cpu_eff < low_efficiency_threshold and cpu_eff > 0:
+            stats.low_efficiency_jobs.append({
+                'job_id': job['job_id'],
+                'user': user,
+                'cpu_efficiency': cpu_eff,
+                'mem_efficiency': mem_eff,
+                'cpu_hours_wasted': cpu_hours_requested - cpu_hours_used,
+            })
+    
+    # Calculate averages
+    if cpu_efficiencies:
+        stats.avg_cpu_efficiency = sum(cpu_efficiencies) / len(cpu_efficiencies)
+    if mem_efficiencies:
+        stats.avg_memory_efficiency = sum(mem_efficiencies) / len(mem_efficiencies)
+    if time_efficiencies:
+        stats.avg_time_efficiency = sum(time_efficiencies) / len(time_efficiencies)
+    
+    # Calculate per-user averages
+    for user, data in stats.efficiency_by_user.items():
+        if data['count'] > 0:
+            data['avg_cpu'] = data['cpu_sum'] / data['count']
+            data['avg_mem'] = data['mem_sum'] / data['count']
+    
+    # Sort low efficiency jobs by waste
+    stats.low_efficiency_jobs.sort(key=lambda x: x['cpu_hours_wasted'], reverse=True)
+    stats.low_efficiency_jobs = stats.low_efficiency_jobs[:20]  # Top 20
+    
+    return stats
+
+
+def _format_report_text(stats: ReportStats, title: str) -> str:
+    """Format report as plain text."""
+    lines = []
+    lines.append("=" * 70)
+    lines.append(f"  {title}")
+    lines.append("=" * 70)
+    lines.append("")
+    
+    # Summary
+    lines.append("SUMMARY")
+    lines.append("-" * 40)
+    lines.append(f"Total Jobs:           {stats.total_jobs}")
+    lines.append(f"  Completed:          {stats.completed_jobs}")
+    lines.append(f"  Failed:             {stats.failed_jobs}")
+    lines.append(f"  Cancelled:          {stats.cancelled_jobs}")
+    lines.append("")
+    
+    # Resource usage
+    lines.append("RESOURCE USAGE")
+    lines.append("-" * 40)
+    lines.append(f"CPU Hours Requested:  {stats.total_cpu_hours_requested:,.1f}")
+    lines.append(f"CPU Hours Used:       {stats.total_cpu_hours_used:,.1f}")
+    lines.append(f"CPU Hours Wasted:     {stats.cpu_waste_hours:,.1f}")
+    lines.append(f"GPU Hours Requested:  {stats.total_gpu_hours_requested:,.1f}")
+    lines.append("")
+    
+    # Efficiency
+    lines.append("EFFICIENCY")
+    lines.append("-" * 40)
+    cpu_bar = _make_bar(stats.overall_cpu_efficiency)
+    mem_bar = _make_bar(stats.overall_memory_efficiency)
+    avg_cpu_bar = _make_bar(stats.avg_cpu_efficiency)
+    avg_mem_bar = _make_bar(stats.avg_memory_efficiency)
+    lines.append(f"Overall CPU:          {cpu_bar} {stats.overall_cpu_efficiency:5.1f}%")
+    lines.append(f"Overall Memory:       {mem_bar} {stats.overall_memory_efficiency:5.1f}%")
+    lines.append(f"Avg Job CPU:          {avg_cpu_bar} {stats.avg_cpu_efficiency:5.1f}%")
+    lines.append(f"Avg Job Memory:       {avg_mem_bar} {stats.avg_memory_efficiency:5.1f}%")
+    lines.append("")
+    
+    # Jobs by partition
+    if stats.jobs_by_partition:
+        lines.append("JOBS BY PARTITION")
+        lines.append("-" * 40)
+        for part, count in sorted(stats.jobs_by_partition.items(), key=lambda x: -x[1]):
+            lines.append(f"  {part:<20} {count:>6}")
+        lines.append("")
+    
+    # Top users by job count
+    if stats.jobs_by_user:
+        lines.append("TOP USERS (by job count)")
+        lines.append("-" * 40)
+        lines.append(f"  {'User':<15} {'Jobs':>6}  {'Avg CPU':>8}  {'Avg Mem':>8}")
+        for user, count in sorted(stats.jobs_by_user.items(), key=lambda x: -x[1])[:10]:
+            user_eff = stats.efficiency_by_user.get(user, {})
+            avg_cpu = user_eff.get('avg_cpu', 0)
+            avg_mem = user_eff.get('avg_mem', 0)
+            lines.append(f"  {user:<15} {count:>6}  {avg_cpu:>7.1f}%  {avg_mem:>7.1f}%")
+        lines.append("")
+    
+    # Low efficiency jobs
+    if stats.low_efficiency_jobs:
+        lines.append("LOW EFFICIENCY JOBS (top 20 by CPU hours wasted)")
+        lines.append("-" * 40)
+        lines.append(f"  {'JobID':<12} {'User':<12} {'CPU Eff':>8} {'Wasted Hrs':>12}")
+        for job in stats.low_efficiency_jobs:
+            lines.append(
+                f"  {job['job_id']:<12} {job['user']:<12} "
+                f"{job['cpu_efficiency']:>7.1f}% {job['cpu_hours_wasted']:>11.1f}"
+            )
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+def _format_report_csv(stats: ReportStats, jobs: List[Dict[str, Any]], config: Config) -> str:
+    """Format report as CSV with per-job details."""
+    lines = []
+    job_stats_helper = JobStats(config)
+    
+    # Header
+    lines.append("job_id,user,account,state,partition,cpus,elapsed_hours,"
+                 "cpu_hours_requested,cpu_hours_used,cpu_efficiency,"
+                 "mem_requested_gb,mem_used_gb,mem_efficiency")
+    
+    for job in jobs:
+        try:
+            cpus = int(job['cpus']) if job['cpus'].isdigit() else 1
+        except:
+            cpus = 1
+        
+        elapsed = job_stats_helper._parse_time(job['elapsed'])
+        timelimit = job_stats_helper._parse_time(job['timelimit'])
+        elapsed_hours = elapsed.total_seconds() / 3600
+        timelimit_hours = timelimit.total_seconds() / 3600 if timelimit.total_seconds() > 0 else elapsed_hours
+        
+        cpu_hours_requested = cpus * timelimit_hours
+        cpu_time = job_stats_helper._parse_cpu_time(job['totalcpu'])
+        cpu_hours_used = cpu_time / 3600
+        cpu_eff = (cpu_hours_used / cpu_hours_requested * 100) if cpu_hours_requested > 0 else 0
+        
+        reqmem_str = job['reqmem']
+        nodes = int(job['nodes']) if job['nodes'].isdigit() else 1
+        mem_multiplier = 1
+        if reqmem_str.endswith('n'):
+            mem_multiplier = nodes
+            reqmem_str = reqmem_str[:-1]
+        elif reqmem_str.endswith('c'):
+            mem_multiplier = cpus
+            reqmem_str = reqmem_str[:-1]
+        
+        mem_requested = job_stats_helper._parse_memory(reqmem_str) * mem_multiplier
+        mem_used = job_stats_helper._parse_memory(job['maxrss'])
+        mem_eff = (mem_used / mem_requested * 100) if mem_requested > 0 else 0
+        
+        lines.append(
+            f"{job['job_id']},{job['user']},{job['account']},{job['state']},{job['partition']},"
+            f"{cpus},{elapsed_hours:.2f},{cpu_hours_requested:.2f},{cpu_hours_used:.2f},{cpu_eff:.1f},"
+            f"{mem_requested/(1024**3):.2f},{mem_used/(1024**3):.2f},{mem_eff:.1f}"
+        )
+    
+    return "\n".join(lines)
+
+
+def _format_report_json(stats: ReportStats) -> str:
+    """Format report as JSON."""
+    data = {
+        'summary': {
+            'total_jobs': stats.total_jobs,
+            'completed_jobs': stats.completed_jobs,
+            'failed_jobs': stats.failed_jobs,
+            'cancelled_jobs': stats.cancelled_jobs,
+        },
+        'resources': {
+            'cpu_hours_requested': round(stats.total_cpu_hours_requested, 2),
+            'cpu_hours_used': round(stats.total_cpu_hours_used, 2),
+            'cpu_hours_wasted': round(stats.cpu_waste_hours, 2),
+            'gpu_hours_requested': round(stats.total_gpu_hours_requested, 2),
+            'memory_gb_hours_requested': round(stats.total_memory_gb_hours_requested, 2),
+            'memory_gb_hours_used': round(stats.total_memory_gb_hours_used, 2),
+        },
+        'efficiency': {
+            'overall_cpu_percent': round(stats.overall_cpu_efficiency, 2),
+            'overall_memory_percent': round(stats.overall_memory_efficiency, 2),
+            'avg_job_cpu_percent': round(stats.avg_cpu_efficiency, 2),
+            'avg_job_memory_percent': round(stats.avg_memory_efficiency, 2),
+        },
+        'jobs_by_partition': stats.jobs_by_partition,
+        'jobs_by_user': stats.jobs_by_user,
+        'user_efficiency': {
+            user: {
+                'job_count': data['count'],
+                'avg_cpu_efficiency': round(data.get('avg_cpu', 0), 2),
+                'avg_memory_efficiency': round(data.get('avg_mem', 0), 2),
+            }
+            for user, data in stats.efficiency_by_user.items()
+        },
+        'low_efficiency_jobs': stats.low_efficiency_jobs,
+    }
+    return json.dumps(data, indent=2)
+
+
+def _format_report_html(stats: ReportStats, title: str) -> str:
+    """Format report as HTML."""
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{title}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        h1 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
+        h2 {{ color: #555; margin-top: 30px; }}
+        .card {{ background: white; border-radius: 8px; padding: 20px; margin: 15px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .stat-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }}
+        .stat {{ text-align: center; padding: 15px; background: #f8f9fa; border-radius: 6px; }}
+        .stat-value {{ font-size: 2em; font-weight: bold; color: #007bff; }}
+        .stat-label {{ color: #666; font-size: 0.9em; margin-top: 5px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
+        th {{ background: #f8f9fa; font-weight: 600; }}
+        tr:hover {{ background: #f5f5f5; }}
+        .progress {{ background: #e9ecef; border-radius: 4px; height: 20px; overflow: hidden; }}
+        .progress-bar {{ height: 100%; transition: width 0.3s; }}
+        .progress-good {{ background: #28a745; }}
+        .progress-warning {{ background: #ffc107; }}
+        .progress-danger {{ background: #dc3545; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>{title}</h1>
+    
+    <div class="card">
+        <h2>Summary</h2>
+        <div class="stat-grid">
+            <div class="stat">
+                <div class="stat-value">{stats.total_jobs}</div>
+                <div class="stat-label">Total Jobs</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{stats.completed_jobs}</div>
+                <div class="stat-label">Completed</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{stats.failed_jobs}</div>
+                <div class="stat-label">Failed</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{stats.cancelled_jobs}</div>
+                <div class="stat-label">Cancelled</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>Resource Usage</h2>
+        <div class="stat-grid">
+            <div class="stat">
+                <div class="stat-value">{stats.total_cpu_hours_requested:,.0f}</div>
+                <div class="stat-label">CPU Hours Requested</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{stats.total_cpu_hours_used:,.0f}</div>
+                <div class="stat-label">CPU Hours Used</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value" style="color: #dc3545;">{stats.cpu_waste_hours:,.0f}</div>
+                <div class="stat-label">CPU Hours Wasted</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{stats.total_gpu_hours_requested:,.0f}</div>
+                <div class="stat-label">GPU Hours</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>Efficiency</h2>
+        <table>
+            <tr>
+                <td style="width: 200px;">Overall CPU Efficiency</td>
+                <td>
+                    <div class="progress">
+                        <div class="progress-bar {'progress-good' if stats.overall_cpu_efficiency >= 70 else 'progress-warning' if stats.overall_cpu_efficiency >= 40 else 'progress-danger'}" style="width: {stats.overall_cpu_efficiency}%;"></div>
+                    </div>
+                </td>
+                <td style="width: 80px; text-align: right;">{stats.overall_cpu_efficiency:.1f}%</td>
+            </tr>
+            <tr>
+                <td>Overall Memory Efficiency</td>
+                <td>
+                    <div class="progress">
+                        <div class="progress-bar {'progress-good' if stats.overall_memory_efficiency >= 60 else 'progress-warning' if stats.overall_memory_efficiency >= 30 else 'progress-danger'}" style="width: {stats.overall_memory_efficiency}%;"></div>
+                    </div>
+                </td>
+                <td style="text-align: right;">{stats.overall_memory_efficiency:.1f}%</td>
+            </tr>
+            <tr>
+                <td>Average Job CPU Efficiency</td>
+                <td>
+                    <div class="progress">
+                        <div class="progress-bar {'progress-good' if stats.avg_cpu_efficiency >= 70 else 'progress-warning' if stats.avg_cpu_efficiency >= 40 else 'progress-danger'}" style="width: {stats.avg_cpu_efficiency}%;"></div>
+                    </div>
+                </td>
+                <td style="text-align: right;">{stats.avg_cpu_efficiency:.1f}%</td>
+            </tr>
+        </table>
+    </div>
+"""
+    
+    # Top users table
+    if stats.jobs_by_user:
+        html += """
+    <div class="card">
+        <h2>Top Users</h2>
+        <table>
+            <thead>
+                <tr><th>User</th><th>Jobs</th><th>Avg CPU Eff</th><th>Avg Mem Eff</th></tr>
+            </thead>
+            <tbody>
+"""
+        for user, count in sorted(stats.jobs_by_user.items(), key=lambda x: -x[1])[:15]:
+            user_eff = stats.efficiency_by_user.get(user, {})
+            avg_cpu = user_eff.get('avg_cpu', 0)
+            avg_mem = user_eff.get('avg_mem', 0)
+            html += f"            <tr><td>{user}</td><td>{count}</td><td>{avg_cpu:.1f}%</td><td>{avg_mem:.1f}%</td></tr>\n"
+        html += """            </tbody>
+        </table>
+    </div>
+"""
+    
+    # Low efficiency jobs
+    if stats.low_efficiency_jobs:
+        html += """
+    <div class="card">
+        <h2>Low Efficiency Jobs (Top 20)</h2>
+        <table>
+            <thead>
+                <tr><th>Job ID</th><th>User</th><th>CPU Efficiency</th><th>CPU Hours Wasted</th></tr>
+            </thead>
+            <tbody>
+"""
+        for job in stats.low_efficiency_jobs:
+            html += f"            <tr><td>{job['job_id']}</td><td>{job['user']}</td><td>{job['cpu_efficiency']:.1f}%</td><td>{job['cpu_hours_wasted']:.1f}</td></tr>\n"
+        html += """            </tbody>
+        </table>
+    </div>
+"""
+    
+    html += """
+</div>
+</body>
+</html>
+"""
+    return html
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Generate efficiency report for a time period."""
+    config = load_config(args.config)
+    
+    # Calculate date range
+    end_date = datetime.now()
+    if args.end:
+        try:
+            end_date = datetime.strptime(args.end, "%Y-%m-%d")
+        except ValueError:
+            print(f"Error: Invalid end date format. Use YYYY-MM-DD", file=sys.stderr)
+            return 1
+    
+    if args.start:
+        try:
+            start_date = datetime.strptime(args.start, "%Y-%m-%d")
+        except ValueError:
+            print(f"Error: Invalid start date format. Use YYYY-MM-DD", file=sys.stderr)
+            return 1
+    else:
+        start_date = end_date - timedelta(days=args.days)
+    
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    
+    # Build title
+    title_parts = ["Job Efficiency Report"]
+    if args.user:
+        title_parts.append(f"User: {args.user}")
+    if args.account:
+        title_parts.append(f"Account: {args.account}")
+    if args.partition:
+        title_parts.append(f"Partition: {args.partition}")
+    title_parts.append(f"{start_str} to {end_str}")
+    title = " | ".join(title_parts)
+    
+    # Query jobs
+    if not args.quiet:
+        print(f"Querying jobs from {start_str} to {end_str}...", file=sys.stderr)
+    
+    jobs = _query_jobs_for_report(
+        config,
+        start_str,
+        end_str,
+        user=args.user,
+        account=args.account,
+        partition=args.partition,
+    )
+    
+    if not jobs:
+        print("No jobs found in the specified time period.", file=sys.stderr)
+        return 1
+    
+    if not args.quiet:
+        print(f"Found {len(jobs)} jobs. Calculating statistics...", file=sys.stderr)
+    
+    # Calculate stats
+    stats = _calculate_report_stats(jobs, config)
+    
+    # Format output
+    if args.format == 'json':
+        output = _format_report_json(stats)
+    elif args.format == 'csv':
+        output = _format_report_csv(stats, jobs, config)
+    elif args.format == 'html':
+        output = _format_report_html(stats, title)
+    else:
+        output = _format_report_text(stats, title)
+    
+    # Write output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        if not args.quiet:
+            print(f"Report written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+    
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Show efficiency status of a job."""
     config = load_config(args.config)
@@ -1236,11 +1878,18 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  schmutz 12345              Show efficiency for job 12345
-  schmutz status 12345       Same as above
-  schmutz update 12345       Update OOD session card for job
-  schmutz list               List active OOD sessions
-  schmutz html 12345         Output HTML card to stdout
+  schmutz 12345                        Show efficiency for job 12345
+  schmutz status 12345                 Same as above
+  schmutz update 12345                 Update OOD session card for job
+  schmutz list                         List active OOD sessions
+  schmutz html 12345                   Output HTML card to stdout
+
+  schmutz report                       Weekly report for current user
+  schmutz report --days 7              Last 7 days (default)
+  schmutz report --user jsmith         Report for specific user
+  schmutz report --account physics     Report for account/group
+  schmutz report --format html -o r.html  Generate HTML report
+  schmutz report --start 2026-01-01 --end 2026-01-31  Custom date range
 """
     )
 
@@ -1271,6 +1920,22 @@ Examples:
     html_parser.add_argument('job_id', help='Slurm job ID')
     html_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
     html_parser.set_defaults(func=cmd_html)
+
+    # Report subcommand
+    report_parser = subparsers.add_parser('report', help='Generate efficiency report')
+    report_parser.add_argument('--days', '-d', type=int, default=7,
+                               help='Number of days to include (default: 7)')
+    report_parser.add_argument('--start', help='Start date (YYYY-MM-DD)')
+    report_parser.add_argument('--end', help='End date (YYYY-MM-DD, default: today)')
+    report_parser.add_argument('--user', '-u', help='Filter by username')
+    report_parser.add_argument('--account', '-a', help='Filter by Slurm account')
+    report_parser.add_argument('--partition', '-p', help='Filter by partition')
+    report_parser.add_argument('--format', '-f', choices=['text', 'json', 'csv', 'html'],
+                               default='text', help='Output format (default: text)')
+    report_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    report_parser.add_argument('--quiet', '-q', action='store_true',
+                               help='Suppress progress messages')
+    report_parser.set_defaults(func=cmd_report)
 
     return parser
 
