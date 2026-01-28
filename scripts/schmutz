@@ -1123,6 +1123,7 @@ def _query_jobs_for_report(
     user: Optional[str] = None,
     account: Optional[str] = None,
     partition: Optional[str] = None,
+    all_users: bool = False,
 ) -> List[Dict[str, Any]]:
     """Query sacct for completed jobs within date range (excludes running jobs)."""
     slurm = config.slurm
@@ -1140,7 +1141,10 @@ def _query_jobs_for_report(
               "Timelimit,NNodes,NCPUs,ReqMem,AllocTRES,ExitCode"
     ]
     
-    if user:
+    # Query all users if requested (for leaderboard) or specific user
+    if all_users:
+        cmd.append("--allusers")
+    elif user:
         cmd.extend(["--user", user])
     if account:
         cmd.extend(["--account", account])
@@ -1722,13 +1726,14 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
     if not args.quiet:
         print(f"Querying jobs from {start_str} to {end_str}...", file=sys.stderr)
     
-    # Query all jobs (no user filter)
+    # Query all users' jobs for leaderboard
     jobs = _query_jobs_for_report(
         config,
         start_str,
         end_str,
         account=args.account,
         partition=args.partition,
+        all_users=True,
     )
     
     if not jobs:
