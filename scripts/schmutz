@@ -1127,6 +1127,7 @@ def _query_jobs_for_report(
     """Query sacct for completed jobs within date range (excludes running jobs)."""
     slurm = config.slurm
     
+    # First query: get main job info with --allocations
     cmd = [
         slurm.sacct_path,
         "--starttime", start_date,
@@ -1136,7 +1137,7 @@ def _query_jobs_for_report(
         # Exclude running/pending jobs - only include jobs that have finished
         "--state", "COMPLETED,FAILED,CANCELLED,TIMEOUT,NODE_FAIL,OUT_OF_MEMORY,PREEMPTED,DEADLINE",
         "-o", "JobID,JobName,User,Account,State,Partition,Submit,Start,End,Elapsed,"
-              "Timelimit,NNodes,NCPUs,ReqMem,MaxRSS,TotalCPU,AllocTRES,ExitCode"
+              "Timelimit,NNodes,NCPUs,ReqMem,AllocTRES,ExitCode"
     ]
     
     if user:
@@ -1155,16 +1156,18 @@ def _query_jobs_for_report(
         logger.error(f"Error running sacct: {e}")
         return []
     
-    jobs = []
+    # Parse main job entries
+    jobs = {}
     for line in result.stdout.strip().split('\n'):
         if not line:
             continue
         parts = line.split('|')
-        if len(parts) < 18:
+        if len(parts) < 16:
             continue
         
-        job = {
-            'job_id': parts[0],
+        job_id = parts[0]
+        jobs[job_id] = {
+            'job_id': job_id,
             'job_name': parts[1],
             'user': parts[2],
             'account': parts[3],
@@ -1178,14 +1181,58 @@ def _query_jobs_for_report(
             'nodes': parts[11],
             'cpus': parts[12],
             'reqmem': parts[13],
-            'maxrss': parts[14],
-            'totalcpu': parts[15],
-            'alloctres': parts[16],
-            'exitcode': parts[17],
+            'alloctres': parts[14],
+            'exitcode': parts[15],
+            'maxrss': '',
+            'totalcpu': '',
         }
-        jobs.append(job)
     
-    return jobs
+    if not jobs:
+        return []
+    
+    # Second query: get MaxRSS and TotalCPU from job steps (batch step has the real data)
+    # Query all steps for the jobs we found
+    job_ids = ','.join(jobs.keys())
+    cmd2 = [
+        slurm.sacct_path,
+        "-j", job_ids,
+        "--noheader", "-P",
+        "-o", "JobID,MaxRSS,TotalCPU"
+    ]
+    
+    try:
+        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=120)
+        if result2.returncode == 0:
+            for line in result2.stdout.strip().split('\n'):
+                if not line:
+                    continue
+                parts = line.split('|')
+                if len(parts) < 3:
+                    continue
+                
+                step_id = parts[0]
+                maxrss = parts[1]
+                totalcpu = parts[2]
+                
+                # Extract base job ID (handle "12345.batch" -> "12345")
+                base_job_id = step_id.split('.')[0]
+                
+                if base_job_id in jobs:
+                    # Prefer .batch step data, but take any non-empty values
+                    # .batch step typically has the most accurate resource usage
+                    if '.batch' in step_id:
+                        if maxrss:
+                            jobs[base_job_id]['maxrss'] = maxrss
+                        if totalcpu:
+                            jobs[base_job_id]['totalcpu'] = totalcpu
+                    elif not jobs[base_job_id]['maxrss'] and maxrss:
+                        jobs[base_job_id]['maxrss'] = maxrss
+                    elif not jobs[base_job_id]['totalcpu'] and totalcpu:
+                        jobs[base_job_id]['totalcpu'] = totalcpu
+    except Exception as e:
+        logger.warning(f"Could not get job step details: {e}")
+    
+    return list(jobs.values())
 
 
 def _calculate_report_stats(
