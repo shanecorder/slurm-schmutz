@@ -1760,6 +1760,10 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
                 'completed': 0,
                 'cpu_hours_requested': 0.0,
                 'cpu_hours_used': 0.0,
+                'cpu_cores_requested': 0,
+                'cpu_cores_used': 0.0,
+                'mem_requested': 0.0,
+                'mem_used': 0.0,
                 'cpu_eff_sum': 0.0,
                 'mem_eff_sum': 0.0,
                 'eff_count': 0,
@@ -1787,12 +1791,16 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
         
         user_stats[user]['cpu_hours_requested'] += cpu_hours_requested
         user_stats[user]['cpu_hours_used'] += cpu_hours_used
+        user_stats[user]['cpu_cores_requested'] += cpus
         
         # Calculate efficiency for this job
         cpu_eff = 0.0
         if cpu_hours_requested > 0:
             cpu_eff = (cpu_hours_used / cpu_hours_requested) * 100
             cpu_eff = min(100.0, max(0.0, cpu_eff))
+        
+        # Track effective CPU cores used (based on efficiency)
+        user_stats[user]['cpu_cores_used'] += cpus * (cpu_eff / 100.0)
         
         reqmem_str = job['reqmem']
         nodes = int(job['nodes']) if job['nodes'].isdigit() else 1
@@ -1806,6 +1814,9 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
         
         mem_requested = job_stats_helper._parse_memory(reqmem_str) * mem_multiplier
         mem_used = job_stats_helper._parse_memory(job['maxrss'])
+        
+        user_stats[user]['mem_requested'] += mem_requested
+        user_stats[user]['mem_used'] += mem_used
         
         mem_eff = 0.0
         if mem_requested > 0:
@@ -1827,20 +1838,21 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
             avg_cpu_eff = 0.0
             avg_mem_eff = 0.0
         
-        # Combined score (weighted average: 60% CPU, 40% memory)
-        combined_score = (avg_cpu_eff * 0.6) + (avg_mem_eff * 0.4)
-        
-        cpu_waste = stats['cpu_hours_requested'] - stats['cpu_hours_used']
+        # Combined score (weighted average: 50% CPU, 50% memory)
+        combined_score = (avg_cpu_eff * 0.5) + (avg_mem_eff * 0.5)
         
         leaderboard.append({
             'user': user,
             'jobs': stats['jobs'],
             'completed': stats['completed'],
+            'cpu_req': stats['cpu_cores_requested'],
+            'cpu_use': stats['cpu_cores_used'],
             'avg_cpu_eff': avg_cpu_eff,
+            'mem_req': stats['mem_requested'],
+            'mem_use': stats['mem_used'],
             'avg_mem_eff': avg_mem_eff,
             'combined_score': combined_score,
             'cpu_hours_used': stats['cpu_hours_used'],
-            'cpu_waste': cpu_waste,
         })
     
     # Sort by combined score (descending) for efficiency ranking
@@ -1852,8 +1864,6 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
         leaderboard.sort(key=lambda x: x['avg_mem_eff'], reverse=True)
     elif args.sort == 'jobs':
         leaderboard.sort(key=lambda x: x['jobs'], reverse=True)
-    elif args.sort == 'waste':
-        leaderboard.sort(key=lambda x: x['cpu_waste'], reverse=True)
     
     # Apply minimum jobs filter
     if args.min_jobs > 0:
@@ -1886,30 +1896,47 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_memory_short(bytes_val: float) -> str:
+    """Format memory value in human-readable short format."""
+    if bytes_val <= 0:
+        return "0"
+    if bytes_val >= 1024**4:
+        return f"{bytes_val / (1024**4):.1f}T"
+    elif bytes_val >= 1024**3:
+        return f"{bytes_val / (1024**3):.1f}G"
+    elif bytes_val >= 1024**2:
+        return f"{bytes_val / (1024**2):.1f}M"
+    elif bytes_val >= 1024:
+        return f"{bytes_val / 1024:.1f}K"
+    else:
+        return f"{bytes_val:.0f}"
+
+
 def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as plain text."""
     lines = []
     lines.append("")
-    lines.append("=" * 85)
+    lines.append("=" * 120)
     lines.append(f"  Efficiency Leaderboard | {start_str} to {end_str} ({days} days)")
-    lines.append("=" * 85)
+    lines.append("=" * 120)
     lines.append("")
-    lines.append(f"{'Rank':<8} {'User':<15} {'Jobs':>6} {'CPU Eff':>10} {'Mem Eff':>10} {'Score':>10} {'Waste Hrs':>12}")
-    lines.append("-" * 85)
+    lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Req':>9} {'CPU Use':>9} {'CPU Eff':>9} {'Mem Req':>10} {'Mem Use':>10} {'Mem Eff':>9} {'Score':>9}")
+    lines.append("-" * 120)
     
     for rank, entry in enumerate(leaderboard, 1):
-        # Plain number ranking
-        rank_str = f"{rank:>4}"
+        # Format memory values
+        mem_req = _format_memory_short(entry['mem_req'])
+        mem_use = _format_memory_short(entry['mem_use'])
         
         lines.append(
-            f"{rank_str:<8} {entry['user']:<15} {entry['jobs']:>6} "
-            f"{entry['avg_cpu_eff']:>9.2f}% {entry['avg_mem_eff']:>9.2f}% "
-            f"{entry['combined_score']:>9.2f}% {entry['cpu_waste']:>11.1f}"
+            f"{rank:<6} {entry['user']:<15} {entry['jobs']:>6} "
+            f"{entry['cpu_req']:>9} {entry['cpu_use']:>9.1f} {entry['avg_cpu_eff']:>8.2f}% "
+            f"{mem_req:>10} {mem_use:>10} {entry['avg_mem_eff']:>8.2f}% "
+            f"{entry['combined_score']:>8.2f}%"
         )
     
     lines.append("")
-    lines.append("Score = 60% CPU efficiency + 40% memory efficiency")
-    lines.append(f"Total users: {len(leaderboard)}")
+    lines.append("Score = 50% CPU efficiency + 50% memory efficiency")
     lines.append("")
     
     return "\n".join(lines)
@@ -1940,7 +1967,6 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         .rank-3 {{ color: #CD7F32; }}
         .medal {{ font-size: 1.2em; margin-right: 5px; }}
         .score {{ font-weight: bold; color: #007bff; }}
-        .waste {{ color: #dc3545; }}
         .efficiency-good {{ color: #28a745; }}
         .efficiency-warning {{ color: #ffc107; }}
         .efficiency-danger {{ color: #dc3545; }}
@@ -1951,7 +1977,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
 <body>
 <div class="container">
     <h1>\U0001F3C6 Efficiency Leaderboard</h1>
-    <p class="subtitle">{start_str} to {end_str} ({days} days) | Score = 60% CPU + 40% Memory efficiency</p>
+    <p class="subtitle">{start_str} to {end_str} ({days} days) | Score = 50% CPU + 50% Memory efficiency</p>
     <p class="sort-hint">Click column headers to sort</p>
     
     <table id="leaderboard">
@@ -1960,10 +1986,13 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
                 <th data-sort="rank" data-type="number">Rank</th>
                 <th data-sort="user" data-type="string">User</th>
                 <th data-sort="jobs" data-type="number">Jobs</th>
-                <th data-sort="cpu" data-type="number">CPU Efficiency</th>
-                <th data-sort="mem" data-type="number">Memory Efficiency</th>
+                <th data-sort="cpureq" data-type="number">CPU Req</th>
+                <th data-sort="cpuuse" data-type="number">CPU Use</th>
+                <th data-sort="cpu" data-type="number">CPU Eff</th>
+                <th data-sort="memreq" data-type="number">Mem Req</th>
+                <th data-sort="memuse" data-type="number">Mem Use</th>
+                <th data-sort="mem" data-type="number">Mem Eff</th>
                 <th data-sort="score" data-type="number">Score</th>
-                <th data-sort="waste" data-type="number">CPU Hours Wasted</th>
             </tr>
         </thead>
         <tbody>
@@ -1988,21 +2017,26 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         cpu_class = 'efficiency-good' if entry['avg_cpu_eff'] >= 70 else 'efficiency-warning' if entry['avg_cpu_eff'] >= 40 else 'efficiency-danger'
         mem_class = 'efficiency-good' if entry['avg_mem_eff'] >= 60 else 'efficiency-warning' if entry['avg_mem_eff'] >= 30 else 'efficiency-danger'
         
-        html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-jobs="{entry['jobs']}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}" data-waste="{entry['cpu_waste']:.2f}">
+        # Format memory values
+        mem_req = _format_memory_short(entry['mem_req'])
+        mem_use = _format_memory_short(entry['mem_use'])
+        
+        html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-jobs="{entry['jobs']}" data-cpureq="{entry['cpu_req']}" data-cpuuse="{entry['cpu_use']:.2f}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-memreq="{entry['mem_req']}" data-memuse="{entry['mem_use']}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}">
                 <td class="rank {rank_class}">{medal}{rank}</td>
                 <td>{entry['user']}</td>
                 <td>{entry['jobs']}</td>
+                <td>{entry['cpu_req']}</td>
+                <td>{entry['cpu_use']:.1f}</td>
                 <td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
+                <td>{mem_req}</td>
+                <td>{mem_use}</td>
                 <td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
                 <td class="score">{entry['combined_score']:.2f}%</td>
-                <td class="waste">{entry['cpu_waste']:,.2f}</td>
             </tr>
 """
     
-    html += f"""        </tbody>
+    html += """        </tbody>
     </table>
-    
-    <p class="footer">Total users: {len(leaderboard)}</p>
 </div>
 
 <script>
@@ -2379,7 +2413,7 @@ Examples:
                            help='Number of days to include (default: 1)')
     lb_parser.add_argument('--account', '-a', help='Filter by Slurm account')
     lb_parser.add_argument('--partition', '-p', help='Filter by partition')
-    lb_parser.add_argument('--sort', '-s', choices=['efficiency', 'cpu', 'memory', 'jobs', 'waste'],
+    lb_parser.add_argument('--sort', '-s', choices=['efficiency', 'cpu', 'memory', 'jobs'],
                            default='efficiency', help='Sort by (default: efficiency)')
     lb_parser.add_argument('--top', '-t', type=int, help='Show only top N users')
     lb_parser.add_argument('--min-jobs', '-m', type=int, default=0,
