@@ -1952,10 +1952,15 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     <title>Efficiency Leaderboard</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1100px; margin: 0 auto; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
         h1 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
         .subtitle {{ color: #666; margin-bottom: 20px; }}
         .generated {{ color: #888; font-size: 0.85em; margin-bottom: 15px; }}
+        .controls {{ background: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .controls-label {{ font-weight: 600; color: #333; margin-right: 15px; }}
+        .column-toggle {{ display: inline-flex; align-items: center; margin-right: 15px; cursor: pointer; }}
+        .column-toggle input {{ margin-right: 5px; cursor: pointer; }}
+        .column-toggle label {{ cursor: pointer; font-size: 0.9em; }}
         table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }}
         th {{ background: #007bff; color: white; padding: 12px 15px; text-align: left; font-weight: 600; cursor: pointer; user-select: none; position: relative; }}
         th:hover {{ background: #0056b3; }}
@@ -1975,6 +1980,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         .efficiency-danger {{ color: #dc3545; }}
         .footer {{ margin-top: 20px; color: #666; font-size: 0.9em; }}
         .sort-hint {{ font-size: 0.85em; color: #888; margin-bottom: 10px; }}
+        .col-hidden {{ display: none; }}
     </style>
 </head>
 <body>
@@ -1982,6 +1988,21 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     <h1>\U0001F3C6 Efficiency Leaderboard</h1>
     <p class="subtitle">{start_str} to {end_str} ({days} days) | Score = 50% CPU + 50% Memory efficiency</p>
     <p class="generated">Generated: {generated_at}</p>
+    
+    <div class="controls">
+        <span class="controls-label">Show columns:</span>
+        <span class="column-toggle"><input type="checkbox" id="col-rank" checked disabled><label for="col-rank">Rank</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-user" checked disabled><label for="col-user">User</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-jobs" data-col="2"><label for="col-jobs">Jobs</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-cpureq" data-col="3"><label for="col-cpureq">CPU Req</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-cpuuse" data-col="4"><label for="col-cpuuse">CPU Use</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-cpu" checked disabled><label for="col-cpu">CPU Eff</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-memreq" data-col="6"><label for="col-memreq">Mem Req</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-memuse" data-col="7"><label for="col-memuse">Mem Use</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-mem" checked disabled><label for="col-mem">Mem Eff</label></span>
+        <span class="column-toggle"><input type="checkbox" id="col-score" checked disabled><label for="col-score">Score</label></span>
+    </div>
+    
     <p class="sort-hint">Click column headers to sort</p>
     
     <table id="leaderboard">
@@ -1989,12 +2010,12 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
             <tr>
                 <th data-sort="rank" data-type="number">Rank</th>
                 <th data-sort="user" data-type="string">User</th>
-                <th data-sort="jobs" data-type="number">Jobs</th>
-                <th data-sort="cpureq" data-type="number">CPU Req</th>
-                <th data-sort="cpuuse" data-type="number">CPU Use</th>
+                <th data-sort="jobs" data-type="number" class="col-hidden">Jobs</th>
+                <th data-sort="cpureq" data-type="number" class="col-hidden">CPU Req</th>
+                <th data-sort="cpuuse" data-type="number" class="col-hidden">CPU Use</th>
                 <th data-sort="cpu" data-type="number">CPU Eff</th>
-                <th data-sort="memreq" data-type="number">Mem Req</th>
-                <th data-sort="memuse" data-type="number">Mem Use</th>
+                <th data-sort="memreq" data-type="number" class="col-hidden">Mem Req</th>
+                <th data-sort="memuse" data-type="number" class="col-hidden">Mem Use</th>
                 <th data-sort="mem" data-type="number">Mem Eff</th>
                 <th data-sort="score" data-type="number">Score</th>
             </tr>
@@ -2028,12 +2049,12 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-jobs="{entry['jobs']}" data-cpureq="{entry['cpu_req']}" data-cpuuse="{entry['cpu_use']:.2f}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-memreq="{entry['mem_req']}" data-memuse="{entry['mem_use']}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}">
                 <td class="rank {rank_class}">{medal}{rank}</td>
                 <td>{entry['user']}</td>
-                <td>{entry['jobs']}</td>
-                <td>{entry['cpu_req']}</td>
-                <td>{entry['cpu_use']:.1f}</td>
+                <td class="col-hidden">{entry['jobs']}</td>
+                <td class="col-hidden">{entry['cpu_req']}</td>
+                <td class="col-hidden">{entry['cpu_use']:.1f}</td>
                 <td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
-                <td>{mem_req}</td>
-                <td>{mem_use}</td>
+                <td class="col-hidden">{mem_req}</td>
+                <td class="col-hidden">{mem_use}</td>
                 <td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
                 <td class="score">{entry['combined_score']:.2f}%</td>
             </tr>
@@ -2044,8 +2065,27 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
 </div>
 
 <script>
-// Sortable table functionality
+// Column visibility toggle
 document.addEventListener('DOMContentLoaded', function() {
+    const toggles = document.querySelectorAll('.column-toggle input[data-col]');
+    
+    toggles.forEach(toggle => {
+        toggle.addEventListener('change', function() {
+            const colIndex = parseInt(this.dataset.col);
+            const table = document.getElementById('leaderboard');
+            const cells = table.querySelectorAll(`th:nth-child(${colIndex + 1}), td:nth-child(${colIndex + 1})`);
+            
+            cells.forEach(cell => {
+                if (this.checked) {
+                    cell.classList.remove('col-hidden');
+                } else {
+                    cell.classList.add('col-hidden');
+                }
+            });
+        });
+    });
+
+    // Sortable table functionality
     const table = document.getElementById('leaderboard');
     const headers = table.querySelectorAll('th');
     let currentSort = { column: null, direction: 'asc' };
