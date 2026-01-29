@@ -1881,6 +1881,10 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
         }, indent=2)
     elif args.format == 'html':
         output = _format_leaderboard_html(leaderboard, start_str, end_str, args.days)
+    elif args.format == 'markdown':
+        output = _format_leaderboard_markdown(leaderboard, start_str, end_str, args.days)
+    elif args.format == 'mdhtml':
+        output = _format_leaderboard_mdhtml(leaderboard, start_str, end_str, args.days)
     else:
         output = _format_leaderboard_text(leaderboard, start_str, end_str, args.days)
     
@@ -1940,6 +1944,158 @@ def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: s
     lines.append("")
     
     return "\n".join(lines)
+
+
+def _format_leaderboard_markdown(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
+    """Format leaderboard as Markdown table."""
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = []
+    lines.append(f"# 🏆 Efficiency Leaderboard")
+    lines.append("")
+    lines.append(f"**Period:** {start_str} to {end_str} ({days} days)")
+    lines.append(f"**Generated:** {generated_at}")
+    lines.append(f"**Score:** 50% CPU efficiency + 50% memory efficiency")
+    lines.append("")
+    lines.append("| Rank | User | Jobs | CPU Req | CPU Use | CPU Eff | Mem Req | Mem Use | Mem Eff | Score |")
+    lines.append("|------|------|-----:|--------:|--------:|--------:|--------:|--------:|--------:|------:|")
+    
+    for rank, entry in enumerate(leaderboard, 1):
+        # Format memory values
+        mem_req = _format_memory_short(entry['mem_req'])
+        mem_use = _format_memory_short(entry['mem_use'])
+        
+        # Medal emoji for top 3
+        if rank == 1:
+            rank_str = "🥇 1"
+        elif rank == 2:
+            rank_str = "🥈 2"
+        elif rank == 3:
+            rank_str = "🥉 3"
+        else:
+            rank_str = str(rank)
+        
+        lines.append(
+            f"| {rank_str} | {entry['user']} | {entry['jobs']} | "
+            f"{entry['cpu_req']} | {entry['cpu_use']:.1f} | {entry['avg_cpu_eff']:.2f}% | "
+            f"{mem_req} | {mem_use} | {entry['avg_mem_eff']:.2f}% | "
+            f"{entry['combined_score']:.2f}% |"
+        )
+    
+    lines.append("")
+    
+    return "\n".join(lines)
+
+
+def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
+    """Format leaderboard as Markdown with embedded interactive HTML."""
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    md = f"""# 🏆 Efficiency Leaderboard
+
+**Period:** {start_str} to {end_str} ({days} days)  
+**Generated:** {generated_at}  
+**Score:** 50% CPU efficiency + 50% memory efficiency
+
+<style>
+.lb-controls {{ background: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px; }}
+.lb-controls label {{ margin-right: 15px; cursor: pointer; font-size: 0.9em; }}
+.lb-controls input {{ margin-right: 4px; cursor: pointer; }}
+.lb-table {{ border-collapse: collapse; width: 100%; }}
+.lb-table th {{ background: #007bff; color: white; padding: 8px 12px; text-align: left; cursor: pointer; }}
+.lb-table th:hover {{ background: #0056b3; }}
+.lb-table td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; }}
+.lb-table tr:hover {{ background: #f5f5f5; }}
+.lb-hidden {{ display: none; }}
+.lb-good {{ color: #28a745; }}
+.lb-warn {{ color: #ffc107; }}
+.lb-bad {{ color: #dc3545; }}
+.lb-score {{ font-weight: bold; color: #007bff; }}
+</style>
+
+<div class="lb-controls">
+<strong>Show columns:</strong>
+<label><input type="checkbox" checked disabled> Rank</label>
+<label><input type="checkbox" checked disabled> User</label>
+<label><input type="checkbox" data-col="2" onchange="lbToggleCol(this)"> Jobs</label>
+<label><input type="checkbox" data-col="3" onchange="lbToggleCol(this)"> CPU Req</label>
+<label><input type="checkbox" data-col="4" onchange="lbToggleCol(this)"> CPU Use</label>
+<label><input type="checkbox" checked disabled> CPU Eff</label>
+<label><input type="checkbox" data-col="6" onchange="lbToggleCol(this)"> Mem Req</label>
+<label><input type="checkbox" data-col="7" onchange="lbToggleCol(this)"> Mem Use</label>
+<label><input type="checkbox" checked disabled> Mem Eff</label>
+<label><input type="checkbox" checked disabled> Score</label>
+</div>
+
+<table class="lb-table" id="lb-table">
+<thead>
+<tr>
+<th>Rank</th>
+<th>User</th>
+<th class="lb-hidden">Jobs</th>
+<th class="lb-hidden">CPU Req</th>
+<th class="lb-hidden">CPU Use</th>
+<th>CPU Eff</th>
+<th class="lb-hidden">Mem Req</th>
+<th class="lb-hidden">Mem Use</th>
+<th>Mem Eff</th>
+<th>Score</th>
+</tr>
+</thead>
+<tbody>
+"""
+    
+    for rank, entry in enumerate(leaderboard, 1):
+        mem_req = _format_memory_short(entry['mem_req'])
+        mem_use = _format_memory_short(entry['mem_use'])
+        
+        # Medal emoji for top 3
+        if rank == 1:
+            rank_str = "🥇 1"
+        elif rank == 2:
+            rank_str = "🥈 2"
+        elif rank == 3:
+            rank_str = "🥉 3"
+        else:
+            rank_str = str(rank)
+        
+        # Efficiency color classes
+        cpu_class = 'lb-good' if entry['avg_cpu_eff'] >= 70 else 'lb-warn' if entry['avg_cpu_eff'] >= 40 else 'lb-bad'
+        mem_class = 'lb-good' if entry['avg_mem_eff'] >= 60 else 'lb-warn' if entry['avg_mem_eff'] >= 30 else 'lb-bad'
+        
+        md += f"""<tr>
+<td>{rank_str}</td>
+<td>{entry['user']}</td>
+<td class="lb-hidden">{entry['jobs']}</td>
+<td class="lb-hidden">{entry['cpu_req']}</td>
+<td class="lb-hidden">{entry['cpu_use']:.1f}</td>
+<td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
+<td class="lb-hidden">{mem_req}</td>
+<td class="lb-hidden">{mem_use}</td>
+<td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
+<td class="lb-score">{entry['combined_score']:.2f}%</td>
+</tr>
+"""
+    
+    md += """</tbody>
+</table>
+
+<script>
+function lbToggleCol(cb) {
+    const col = parseInt(cb.dataset.col);
+    const table = document.getElementById('lb-table');
+    const cells = table.querySelectorAll('th:nth-child(' + (col + 1) + '), td:nth-child(' + (col + 1) + ')');
+    cells.forEach(cell => {
+        if (cb.checked) {
+            cell.classList.remove('lb-hidden');
+        } else {
+            cell.classList.add('lb-hidden');
+        }
+    });
+}
+</script>
+"""
+    
+    return md
 
 
 def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
@@ -2462,7 +2618,7 @@ Examples:
     lb_parser.add_argument('--top', '-t', type=int, help='Show only top N users')
     lb_parser.add_argument('--min-jobs', '-m', type=int, default=0,
                            help='Minimum jobs to be included (default: 0)')
-    lb_parser.add_argument('--format', '-f', choices=['text', 'json', 'html'],
+    lb_parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
                            default='text', help='Output format (default: text)')
     lb_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
     lb_parser.add_argument('--quiet', '-q', action='store_true',
