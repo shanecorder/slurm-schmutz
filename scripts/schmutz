@@ -2012,6 +2012,7 @@ def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str:
 <details>
 <summary>Details</summary>
 <p><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
+<p style="font-size: 0.85em; color: #555; margin: 8px 0;">This leaderboard ranks users by how efficiently they use allocated cluster resources. <strong>CPU Eff</strong> = CPU time used / CPU time requested. <strong>Mem Eff</strong> = peak memory used / memory requested. <strong>Score</strong> = average of CPU and Memory efficiency (50/50 weighting). Higher scores indicate better resource utilization. This report runs automatically every night at 11:59 PM and displays jobs from the previous day.</p>
 <div class="lb-controls">
 <strong>Add columns:</strong>
 <label><input type="checkbox" data-col="2" onchange="lbToggleCol(this)">Jobs</label>
@@ -2146,6 +2147,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         <summary>Details</summary>
         <div class="details-content">
             <p style="margin: 0 0 8px 0; font-size: 0.85em;"><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
+            <p style="font-size: 0.85em; color: #555; margin: 0 0 10px 0; max-width: 600px;">This leaderboard ranks users by how efficiently they use allocated cluster resources. <strong>CPU Eff</strong> = CPU time used / CPU time requested. <strong>Mem Eff</strong> = peak memory used / memory requested. <strong>Score</strong> = average of CPU and Memory efficiency (50/50 weighting). Higher scores indicate better resource utilization. This report runs automatically every night at 11:59 PM and displays jobs from the previous day.</p>
             <div class="controls">
                 <span class="controls-label">Add columns:</span>
                 <span class="column-toggle"><input type="checkbox" id="col-jobs" data-col="2"><label for="col-jobs">Jobs</label></span>
