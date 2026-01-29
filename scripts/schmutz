@@ -2136,6 +2136,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         summary {{ cursor: pointer; font-size: 0.85em; color: #666; padding: 4px 0; }}
         summary:hover {{ color: #333; }}
         .details-content {{ padding-top: 8px; }}
+        h3 {{ white-space: nowrap; }}
     </style>
 </head>
 <body>
