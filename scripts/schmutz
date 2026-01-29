@@ -2010,7 +2010,8 @@ def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str:
 </style>
 
 <details>
-<summary>Options (Period: {days_str} | Generated: {generated_at})</summary>
+<summary>Details</summary>
+<p><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
 <div class="lb-controls">
 <strong>Add columns:</strong>
 <label><input type="checkbox" data-col="2" onchange="lbToggleCol(this)">Jobs</label>
@@ -2141,8 +2142,9 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     <h3>\\U0001F3C6 Efficiency Leaders</h3>
     
     <details>
-        <summary>Options (Period: {days_str} | Generated: {generated_at})</summary>
+        <summary>Details</summary>
         <div class="details-content">
+            <p style="margin: 0 0 8px 0; font-size: 0.85em;"><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
             <div class="controls">
                 <span class="controls-label">Add columns:</span>
                 <span class="column-toggle"><input type="checkbox" id="col-jobs" data-col="2"><label for="col-jobs">Jobs</label></span>
