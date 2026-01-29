@@ -1988,13 +1988,14 @@ def _format_leaderboard_markdown(leaderboard: List[Dict], start_str: str, end_st
 
 def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as Markdown with embedded interactive HTML."""
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = datetime.now().strftime("%y-%m-%d %H:%M:%S")
+    # Convert date strings to shorter format
+    start_short = datetime.strptime(start_str, "%Y-%m-%d").strftime("%y-%m-%d")
+    end_short = datetime.strptime(end_str, "%Y-%m-%d").strftime("%y-%m-%d")
     
-    md = f"""# 🏆 Efficiency Leaderboard
+    md = f"""## 🏆 Efficiency Leaderboard
 
-**Period:** {start_str} to {end_str} ({days} days)  
-**Generated:** {generated_at}  
-**Score:** 50% CPU efficiency + 50% memory efficiency
+**Period:** {start_short} to {end_short} ({days} days) | **Score:** CPU eff + memory eff | **Generated:** {generated_at}
 
 <style>
 .lb-controls {{ background: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px; }}
@@ -2013,17 +2014,12 @@ def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str:
 </style>
 
 <div class="lb-controls">
-<strong>Show columns:</strong>
-<label><input type="checkbox" checked disabled> Rank</label>
-<label><input type="checkbox" checked disabled> User</label>
+<strong>Add columns:</strong>
 <label><input type="checkbox" data-col="2" onchange="lbToggleCol(this)"> Jobs</label>
 <label><input type="checkbox" data-col="3" onchange="lbToggleCol(this)"> CPU Req</label>
 <label><input type="checkbox" data-col="4" onchange="lbToggleCol(this)"> CPU Use</label>
-<label><input type="checkbox" checked disabled> CPU Eff</label>
 <label><input type="checkbox" data-col="6" onchange="lbToggleCol(this)"> Mem Req</label>
 <label><input type="checkbox" data-col="7" onchange="lbToggleCol(this)"> Mem Use</label>
-<label><input type="checkbox" checked disabled> Mem Eff</label>
-<label><input type="checkbox" checked disabled> Score</label>
 </div>
 
 <table class="lb-table" id="lb-table">
@@ -2100,7 +2096,10 @@ function lbToggleCol(cb) {
 
 def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as HTML with sortable columns."""
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = datetime.now().strftime("%y-%m-%d %H:%M:%S")
+    # Convert date strings to shorter format
+    start_short = datetime.strptime(start_str, "%Y-%m-%d").strftime("%y-%m-%d")
+    end_short = datetime.strptime(end_str, "%Y-%m-%d").strftime("%y-%m-%d")
     html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2109,9 +2108,8 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
         .container {{ max-width: 1200px; margin: 0 auto; }}
-        h1 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
-        .subtitle {{ color: #666; margin-bottom: 20px; }}
-        .generated {{ color: #888; font-size: 0.85em; margin-bottom: 15px; }}
+        h2 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
+        .subtitle {{ color: #666; margin-bottom: 15px; font-size: 0.95em; }}
         .controls {{ background: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
         .controls-label {{ font-weight: 600; color: #333; margin-right: 15px; }}
         .column-toggle {{ display: inline-flex; align-items: center; margin-right: 15px; cursor: pointer; }}
@@ -2141,22 +2139,16 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
 </head>
 <body>
 <div class="container">
-    <h1>\U0001F3C6 Efficiency Leaderboard</h1>
-    <p class="subtitle">{start_str} to {end_str} ({days} days) | Score = 50% CPU + 50% Memory efficiency</p>
-    <p class="generated">Generated: {generated_at}</p>
+    <h2>\U0001F3C6 Efficiency Leaderboard</h2>
+    <p class="subtitle">{start_short} to {end_short} ({days} days) | Score: CPU eff + memory eff | Generated: {generated_at}</p>
     
     <div class="controls">
-        <span class="controls-label">Show columns:</span>
-        <span class="column-toggle"><input type="checkbox" id="col-rank" checked disabled><label for="col-rank">Rank</label></span>
-        <span class="column-toggle"><input type="checkbox" id="col-user" checked disabled><label for="col-user">User</label></span>
+        <span class="controls-label">Add columns:</span>
         <span class="column-toggle"><input type="checkbox" id="col-jobs" data-col="2"><label for="col-jobs">Jobs</label></span>
         <span class="column-toggle"><input type="checkbox" id="col-cpureq" data-col="3"><label for="col-cpureq">CPU Req</label></span>
         <span class="column-toggle"><input type="checkbox" id="col-cpuuse" data-col="4"><label for="col-cpuuse">CPU Use</label></span>
-        <span class="column-toggle"><input type="checkbox" id="col-cpu" checked disabled><label for="col-cpu">CPU Eff</label></span>
         <span class="column-toggle"><input type="checkbox" id="col-memreq" data-col="6"><label for="col-memreq">Mem Req</label></span>
         <span class="column-toggle"><input type="checkbox" id="col-memuse" data-col="7"><label for="col-memuse">Mem Use</label></span>
-        <span class="column-toggle"><input type="checkbox" id="col-mem" checked disabled><label for="col-mem">Mem Eff</label></span>
-        <span class="column-toggle"><input type="checkbox" id="col-score" checked disabled><label for="col-score">Score</label></span>
     </div>
     
     <p class="sort-hint">Click column headers to sort</p>
