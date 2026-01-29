@@ -1719,7 +1719,7 @@ def _format_report_html(stats: ReportStats, title: str) -> str:
 
 
 def cmd_leaderboard(args: argparse.Namespace) -> int:
-    """Generate user efficiency leaderboard."""
+    """Generate user efficiency leaders."""
     config = load_config(args.config)
     
     # Calculate date range
@@ -1921,7 +1921,7 @@ def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: s
     lines = []
     lines.append("")
     lines.append("=" * 120)
-    lines.append(f"  Efficiency Leaderboard | {start_str} to {end_str} ({days} days)")
+    lines.append(f"  Efficiency Leaders | {start_str} to {end_str} ({days} days)")
     lines.append("=" * 120)
     lines.append("")
     lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Req':>9} {'CPU Use':>9} {'CPU Eff':>9} {'Mem Req':>10} {'Mem Use':>10} {'Mem Eff':>9} {'Score':>9}")
@@ -1950,7 +1950,7 @@ def _format_leaderboard_markdown(leaderboard: List[Dict], start_str: str, end_st
     """Format leaderboard as Markdown table."""
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = []
-    lines.append(f"# 🏆 Efficiency Leaderboard")
+    lines.append(f"# 🏆 Efficiency Leaders")
     lines.append("")
     lines.append(f"**Period:** {start_str} to {end_str} ({days} days)")
     lines.append(f"**Generated:** {generated_at}")
@@ -1991,7 +1991,7 @@ def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str:
     generated_at = datetime.now().strftime("%y-%m-%d %H:%M:%S")
     days_str = "1 day" if days == 1 else f"{days} days"
     
-    md = f"""## 🏆 Efficiency Leaderboard
+    md = f"""## 🏆 Efficiency Leaders
 
 <style>
 .lb-controls {{ background: #f8f9fa; padding: 6px 10px; border-radius: 5px; margin-bottom: 8px; font-size: 0.85em; white-space: nowrap; display: inline-block; }}
@@ -2101,7 +2101,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Efficiency Leaderboard</title>
+    <title>Efficiency Leaders</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
         h2 {{ color: #333; border-bottom: 2px solid #275E81; padding-bottom: 10px; white-space: nowrap; margin-bottom: 8px; display: inline-block; }}
