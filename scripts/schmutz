@@ -2103,8 +2103,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     <title>Efficiency Leaderboard</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ margin: 0 auto; display: inline-block; min-width: 100%; }}
-        h2 {{ color: #333; border-bottom: 2px solid #275E81; padding-bottom: 10px; white-space: nowrap; margin-bottom: 8px; }}
+        h2 {{ color: #333; border-bottom: 2px solid #275E81; padding-bottom: 10px; white-space: nowrap; margin-bottom: 8px; display: inline-block; }}
         .subtitle {{ color: #666; margin-bottom: 10px; font-size: 0.9em; white-space: nowrap; }}
         .controls {{ background: white; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-size: 0.85em; white-space: nowrap; display: inline-block; }}
         .controls-label {{ font-weight: 600; color: #333; margin-right: 10px; }}
@@ -2134,8 +2133,7 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     </style>
 </head>
 <body>
-<div class="container">
-    <h2>\U0001F3C6 Efficiency Leaderboard</h2>
+    <h2>\\U0001F3C6 Efficiency Leaderboard</h2>
     <p class="subtitle">Period: {days_str} | Generated: {generated_at}</p>
     
     <div class="controls">
@@ -2206,7 +2204,6 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     
     html += """        </tbody>
     </table>
-</div>
 
 <script>
 // Column visibility toggle
