@@ -1996,10 +1996,10 @@ def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str:
 **Period:** {days_str} | **Generated:** {generated_at}
 
 <style>
-.lb-controls {{ background: #f8f9fa; padding: 6px 10px; border-radius: 5px; margin-bottom: 8px; font-size: 0.85em; }}
+.lb-controls {{ background: #f8f9fa; padding: 6px 10px; border-radius: 5px; margin-bottom: 8px; font-size: 0.85em; white-space: nowrap; display: inline-block; }}
 .lb-controls label {{ margin-right: 12px; cursor: pointer; }}
 .lb-controls input {{ margin-right: 3px; cursor: pointer; }}
-.lb-table {{ border-collapse: collapse; width: 100%; }}
+.lb-table {{ border-collapse: collapse; }}
 .lb-table th {{ background: #275E81; color: white; padding: 8px 12px; text-align: left; cursor: pointer; white-space: nowrap; }}
 .lb-table th:hover {{ background: #1d4a66; }}
 .lb-table td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; white-space: nowrap; }}
@@ -2103,15 +2103,15 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
     <title>Efficiency Leaderboard</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        h2 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
-        .subtitle {{ color: #666; margin-bottom: 15px; font-size: 0.95em; }}
-        .controls {{ background: white; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-size: 0.85em; }}
+        .container {{ margin: 0 auto; display: inline-block; min-width: 100%; }}
+        h2 {{ color: #333; border-bottom: 2px solid #275E81; padding-bottom: 10px; white-space: nowrap; margin-bottom: 8px; }}
+        .subtitle {{ color: #666; margin-bottom: 10px; font-size: 0.9em; white-space: nowrap; }}
+        .controls {{ background: white; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-size: 0.85em; white-space: nowrap; display: inline-block; }}
         .controls-label {{ font-weight: 600; color: #333; margin-right: 10px; }}
         .column-toggle {{ display: inline-flex; align-items: center; margin-right: 12px; cursor: pointer; }}
         .column-toggle input {{ margin-right: 3px; cursor: pointer; }}
         .column-toggle label {{ cursor: pointer; }}
-        table {{ width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }}
+        table {{ border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }}
         th {{ background: #275E81; color: white; padding: 10px 12px; text-align: left; font-weight: 600; cursor: pointer; user-select: none; position: relative; white-space: nowrap; }}
         th:hover {{ background: #1d4a66; }}
         th.sort-asc::after {{ content: ' \25B2'; font-size: 0.8em; }}
