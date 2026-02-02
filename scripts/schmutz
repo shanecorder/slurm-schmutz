@@ -2970,15 +2970,13 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
     top_users = data['top_users']
     partitions = data.get('partitions', {})
     
-    # Build top users string
-    top_users_str = ""
-    if top_users:
-        top_users_str = " | ".join([f"**{u['user']}** ({u['running_jobs']} jobs)" for u in top_users[:3]])
+    # Build top users summary string
+    top_users_summary = "None" if not top_users else ", ".join([u['user'] for u in top_users[:3]])
     
     md = f"""## \U0001F4CA Cluster Sitrep
 
 <style>
-.sr-table {{ border-collapse: collapse; }}
+.sr-table {{ border-collapse: collapse; margin: 8px 0; }}
 .sr-table th {{ background: #005f85; color: white; padding: 6px 10px; text-align: left; white-space: nowrap; }}
 .sr-table td {{ padding: 6px 10px; border-bottom: 1px solid #ddd; white-space: nowrap; }}
 .sr-table tr:hover {{ background: #f5f5f5; }}
@@ -2986,30 +2984,66 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
 .sr-warn {{ color: #f39c12; font-weight: bold; }}
 .sr-bad {{ color: #e74c3c; font-weight: bold; }}
 .sr-val {{ font-weight: bold; }}
+.sr-blue {{ color: #3498db; font-weight: bold; }}
 </style>
 
 <details>
-<summary>Details</summary>
-<p><strong>Generated:</strong> {timestamp}</p>
-<p style="font-size: 0.85em; color: #555; margin: 8px 0;">Real-time cluster status from sinfo and squeue. <strong>Nodes:</strong> allocated=fully busy, mixed=partially used, idle=available. <strong>Resources:</strong> totals currently in use by running jobs.</p>
+<summary>\U0001F5A5 <strong>Nodes</strong> — {nodes['total']} total (<span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-bad">{nodes['down']}</span> down)</summary>
+<table class="sr-table">
+<tr><th>State</th><th>Count</th><th>Description</th></tr>
+<tr><td>Total</td><td class="sr-val">{nodes['total']}</td><td>All nodes in cluster</td></tr>
+<tr><td>Allocated</td><td class="sr-good">{nodes['allocated']}</td><td>Fully allocated</td></tr>
+<tr><td>Mixed</td><td class="sr-blue">{nodes['mixed']}</td><td>Partially allocated</td></tr>
+<tr><td>Idle</td><td class="sr-good">{nodes['idle']}</td><td>Available for jobs</td></tr>
+<tr><td>Drain</td><td class="sr-warn">{nodes['drain']}</td><td>Draining or drained</td></tr>
+<tr><td>Down</td><td class="sr-bad">{nodes['down']}</td><td>Unavailable</td></tr>
+</table>
 </details>
 
+<details>
+<summary>\U0001F4CB <strong>Jobs</strong> — <span class="sr-good">{jobs['running']}</span> running, <span class="sr-warn">{jobs['pending']}</span> pending</summary>
 <table class="sr-table">
-<tr><th>Nodes</th><th>Jobs</th><th>Resources (in use)</th><th>Top Users</th></tr>
-<tr>
-<td><span class="sr-val">{nodes['total']}</span> total: <span class="sr-good">{nodes['allocated']}</span> alloc, <span style="color:#3498db;font-weight:bold;">{nodes['mixed']}</span> mix, <span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-warn">{nodes['drain']}</span> drain, <span class="sr-bad">{nodes['down']}</span> down</td>
-<td><span class="sr-good">{jobs['running']}</span> run, <span class="sr-warn">{jobs['pending']}</span> pend</td>
-<td><span class="sr-val">{res['cpus']}</span> CPU, <span class="sr-val">{res['memory_human']}</span> mem, <span class="sr-val">{res['gpus']}</span> GPU</td>
-<td>{top_users_str if top_users_str else "—"}</td>
-</tr>
+<tr><th>State</th><th>Count</th></tr>
+<tr><td>Running</td><td class="sr-good">{jobs['running']}</td></tr>
+<tr><td>Pending</td><td class="sr-warn">{jobs['pending']}</td></tr>
+<tr><td>Total</td><td class="sr-val">{jobs['total']}</td></tr>
 </table>
+</details>
+
+<details>
+<summary>\U0001F4BB <strong>Resources</strong> — {res['cpus']} CPUs, {res['memory_human']} mem, {res['gpus']} GPUs in use</summary>
+<p style="font-size: 0.85em; color: #555; margin: 8px 0;">Resources currently allocated to running jobs:</p>
+<table class="sr-table">
+<tr><th>Resource</th><th>In Use</th></tr>
+<tr><td>CPUs</td><td class="sr-val">{res['cpus']}</td></tr>
+<tr><td>Memory</td><td class="sr-val">{res['memory_human']}</td></tr>
+<tr><td>GPUs</td><td class="sr-val">{res['gpus']}</td></tr>
+</table>
+</details>
+
+<details>
+<summary>\U0001F3C6 <strong>Top Users</strong> — {top_users_summary}</summary>
 """
     
-    # Partition breakdown in collapsible details
+    if top_users:
+        md += """<table class="sr-table">
+<tr><th>#</th><th>User</th><th>Jobs</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
+"""
+        for i, user in enumerate(top_users, 1):
+            mem = _format_memory_short(user['memory'])
+            md += f"<tr><td>{i}</td><td>{user['user']}</td><td>{user['running_jobs']}</td><td>{user['cpus']}</td><td>{mem}</td><td>{user['gpus']}</td></tr>\n"
+        md += "</table>\n"
+    else:
+        md += "<p style=\"color: #666;\">No running jobs</p>\n"
+    
+    md += "</details>\n"
+    
+    # Partition breakdown
     if partitions:
-        md += """
+        num_partitions = len(partitions)
+        md += f"""
 <details>
-<summary>Partition breakdown</summary>
+<summary>\U0001F4C1 <strong>Partitions</strong> — {num_partitions} partition{"s" if num_partitions != 1 else ""}</summary>
 <table class="sr-table">
 <tr><th>Partition</th><th>Running</th><th>Pending</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
 """
@@ -3018,6 +3052,11 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
             md += f"<tr><td>{part_name}</td><td>{part_data['running']}</td><td>{part_data['pending']}</td><td>{part_data['cpus']}</td><td>{mem}</td><td>{part_data['gpus']}</td></tr>\n"
         md += """</table>
 </details>
+"""
+    
+    # Timestamp footer
+    md += f"""
+<p style="font-size: 0.8em; color: #888; margin-top: 10px;">Generated: {timestamp}</p>
 """
     
     return md
