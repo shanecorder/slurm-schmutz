@@ -32,7 +32,6 @@ trap 'rm -f "$TMPFILE"' EXIT
 if [[ -f "$SITREP" ]]; then
   cat "$SITREP" >> "$TMPFILE"
 else
-  echo "## 📊 Cluster Sitrep" >> "$TMPFILE"
   echo >> "$TMPFILE"
   echo "_Sitrep data not available._" >> "$TMPFILE"
 fi

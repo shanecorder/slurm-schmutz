@@ -3093,9 +3093,9 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
 details {{ margin-bottom: 8px; }}
 details > summary {{ background: #005f85; color: white; padding: 6px 10px; border-radius: 4px; cursor: pointer; list-style: none; }}
 details > summary::-webkit-details-marker {{ display: none; }}
-details > summary::before {{ content: '\25B6'; margin-right: 8px; font-size: 0.8em; }}
+details > summary::before {{ content: '▶ '; font-size: 0.8em; }}
 details[open] > summary {{ border-radius: 4px 4px 0 0; }}
-details[open] > summary::before {{ content: '\25BC'; }}
+details[open] > summary::before {{ content: '▼ '; }}
 details > summary .sr-good {{ color: #90EE90; }}
 details > summary .sr-warn {{ color: #FFD700; }}
 details > summary .sr-bad {{ color: #FF6B6B; }}
