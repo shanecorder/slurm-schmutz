@@ -109,6 +109,7 @@ class SlurmConfig:
     sacct_path: str = field(default_factory=lambda: _find_command('sacct'))
     squeue_path: str = field(default_factory=lambda: _find_command('squeue'))
     scontrol_path: str = field(default_factory=lambda: _find_command('scontrol'))
+    sinfo_path: str = field(default_factory=lambda: _find_command('sinfo'))
     command_timeout: int = 30
     
     def __post_init__(self):
@@ -121,6 +122,8 @@ class SlurmConfig:
             self.squeue_path = _find_command('squeue')
         if not self.scontrol_path:
             self.scontrol_path = _find_command('scontrol')
+        if not self.sinfo_path:
+            self.sinfo_path = _find_command('sinfo')
 
 
 @dataclass
@@ -2294,6 +2297,589 @@ document.addEventListener('DOMContentLoaded', function() {
     return html
 
 
+# =============================================================================
+# Sitrep Command - Cluster Status Overview
+# =============================================================================
+
+def cmd_sitrep(args: argparse.Namespace) -> int:
+    """Generate high-level cluster status report using sinfo and squeue."""
+    config = load_config(args.config)
+    job_stats_helper = JobStats(config)
+    
+    if not args.quiet:
+        print("Gathering cluster status...", file=sys.stderr)
+    
+    # Get node status from sinfo
+    node_info = _get_node_info(config, job_stats_helper)
+    
+    # Get job queue status from squeue
+    queue_info = _get_queue_info(config, job_stats_helper)
+    
+    # Get top users
+    top_users = _get_top_users(queue_info.get('jobs', []))
+    
+    # Build sitrep data
+    sitrep_data = {
+        'timestamp': datetime.now().isoformat(),
+        'nodes': node_info,
+        'jobs': {
+            'running': queue_info.get('running', 0),
+            'pending': queue_info.get('pending', 0),
+            'total': queue_info.get('total', 0),
+        },
+        'resources_requested': {
+            'cpus': queue_info.get('total_cpus', 0),
+            'memory_bytes': queue_info.get('total_memory', 0),
+            'memory_human': _format_memory_short(queue_info.get('total_memory', 0)),
+            'gpus': queue_info.get('total_gpus', 0),
+        },
+        'top_users': top_users,
+        'partitions': queue_info.get('partitions', {}),
+    }
+    
+    # Format output
+    if args.format == 'json':
+        output = json.dumps(sitrep_data, indent=2)
+    elif args.format == 'html':
+        output = _format_sitrep_html(sitrep_data)
+    else:
+        output = _format_sitrep_text(sitrep_data)
+    
+    # Write output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        if not args.quiet:
+            print(f"Sitrep written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+    
+    return 0
+
+
+def _get_node_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
+    """Get node status information from sinfo."""
+    node_info = {
+        'total': 0,
+        'allocated': 0,
+        'idle': 0,
+        'down': 0,
+        'drain': 0,
+        'mixed': 0,
+        'reserved': 0,
+        'other': 0,
+        'by_partition': {},
+    }
+    
+    # Run sinfo to get node states
+    # Format: PARTITION|AVAIL|NODES|STATE|NODELIST
+    cmd = [
+        config.slurm.sinfo_path,
+        '--noheader',
+        '-o', '%P|%a|%D|%T|%N'
+    ]
+    
+    stdout, stderr, rc = job_stats._run_command(cmd)
+    if rc != 0:
+        logger.warning(f"sinfo command failed: {stderr}")
+        return node_info
+    
+    for line in stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split('|')
+        if len(parts) < 4:
+            continue
+        
+        partition = parts[0].rstrip('*')  # Remove default partition marker
+        avail = parts[1]
+        try:
+            nodes = int(parts[2])
+        except ValueError:
+            nodes = 0
+        state = parts[3].lower()
+        
+        # Track by partition
+        if partition not in node_info['by_partition']:
+            node_info['by_partition'][partition] = {
+                'total': 0, 'allocated': 0, 'idle': 0, 'down': 0,
+                'drain': 0, 'mixed': 0, 'reserved': 0, 'other': 0
+            }
+        
+        node_info['total'] += nodes
+        node_info['by_partition'][partition]['total'] += nodes
+        
+        # Categorize state
+        if 'alloc' in state:
+            node_info['allocated'] += nodes
+            node_info['by_partition'][partition]['allocated'] += nodes
+        elif 'idle' in state:
+            node_info['idle'] += nodes
+            node_info['by_partition'][partition]['idle'] += nodes
+        elif 'down' in state:
+            node_info['down'] += nodes
+            node_info['by_partition'][partition]['down'] += nodes
+        elif 'drain' in state:
+            node_info['drain'] += nodes
+            node_info['by_partition'][partition]['drain'] += nodes
+        elif 'mix' in state:
+            node_info['mixed'] += nodes
+            node_info['by_partition'][partition]['mixed'] += nodes
+        elif 'resv' in state:
+            node_info['reserved'] += nodes
+            node_info['by_partition'][partition]['reserved'] += nodes
+        else:
+            node_info['other'] += nodes
+            node_info['by_partition'][partition]['other'] += nodes
+    
+    return node_info
+
+
+def _get_queue_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
+    """Get job queue information from squeue."""
+    queue_info = {
+        'running': 0,
+        'pending': 0,
+        'total': 0,
+        'total_cpus': 0,
+        'total_memory': 0,
+        'total_gpus': 0,
+        'jobs': [],
+        'partitions': {},
+    }
+    
+    # Run squeue to get all jobs
+    # Format: JOBID|USER|STATE|PARTITION|CPUS|MIN_MEMORY|GRES|NODES
+    cmd = [
+        config.slurm.squeue_path,
+        '--noheader',
+        '-o', '%i|%u|%T|%P|%C|%m|%b|%D'
+    ]
+    
+    stdout, stderr, rc = job_stats._run_command(cmd)
+    if rc != 0:
+        logger.warning(f"squeue command failed: {stderr}")
+        return queue_info
+    
+    for line in stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split('|')
+        if len(parts) < 8:
+            continue
+        
+        job_id = parts[0]
+        user = parts[1]
+        state = parts[2].upper()
+        partition = parts[3]
+        try:
+            cpus = int(parts[4])
+        except ValueError:
+            cpus = 0
+        mem_str = parts[5]
+        gres_str = parts[6]
+        try:
+            nodes = int(parts[7])
+        except ValueError:
+            nodes = 1
+        
+        # Parse memory
+        mem_bytes = job_stats._parse_memory(mem_str.rstrip('n').rstrip('c'))
+        # If memory is per-node or per-cpu, multiply appropriately
+        if mem_str.endswith('n'):
+            mem_bytes *= nodes
+        elif mem_str.endswith('c'):
+            mem_bytes *= cpus
+        
+        # Parse GPUs from GRES
+        gpus = 0
+        if gres_str and gres_str != '(null)':
+            gpu_match = re.search(r'gpu[^:]*:(\d+)', gres_str.lower())
+            if gpu_match:
+                gpus = int(gpu_match.group(1))
+        
+        job_entry = {
+            'job_id': job_id,
+            'user': user,
+            'state': state,
+            'partition': partition,
+            'cpus': cpus,
+            'memory': mem_bytes,
+            'gpus': gpus,
+            'nodes': nodes,
+        }
+        queue_info['jobs'].append(job_entry)
+        
+        # Track partition stats
+        if partition not in queue_info['partitions']:
+            queue_info['partitions'][partition] = {
+                'running': 0, 'pending': 0, 'cpus': 0, 'memory': 0, 'gpus': 0
+            }
+        
+        queue_info['total'] += 1
+        
+        if state == 'RUNNING':
+            queue_info['running'] += 1
+            queue_info['partitions'][partition]['running'] += 1
+            queue_info['total_cpus'] += cpus
+            queue_info['total_memory'] += mem_bytes
+            queue_info['total_gpus'] += gpus
+            queue_info['partitions'][partition]['cpus'] += cpus
+            queue_info['partitions'][partition]['memory'] += mem_bytes
+            queue_info['partitions'][partition]['gpus'] += gpus
+        elif state == 'PENDING':
+            queue_info['pending'] += 1
+            queue_info['partitions'][partition]['pending'] += 1
+    
+    return queue_info
+
+
+def _get_top_users(jobs: List[Dict]) -> List[Dict[str, Any]]:
+    """Get top 3 users by running job count."""
+    user_stats: Dict[str, Dict[str, Any]] = {}
+    
+    for job in jobs:
+        if job['state'] != 'RUNNING':
+            continue
+        
+        user = job['user']
+        if user not in user_stats:
+            user_stats[user] = {
+                'user': user,
+                'running_jobs': 0,
+                'cpus': 0,
+                'memory': 0,
+                'gpus': 0,
+            }
+        
+        user_stats[user]['running_jobs'] += 1
+        user_stats[user]['cpus'] += job['cpus']
+        user_stats[user]['memory'] += job['memory']
+        user_stats[user]['gpus'] += job['gpus']
+    
+    # Sort by running jobs, then by CPUs
+    sorted_users = sorted(
+        user_stats.values(),
+        key=lambda x: (x['running_jobs'], x['cpus']),
+        reverse=True
+    )
+    
+    return sorted_users[:3]
+
+
+def _format_sitrep_text(data: Dict[str, Any]) -> str:
+    """Format sitrep as plain text."""
+    lines = []
+    timestamp = datetime.fromisoformat(data['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+    
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append(f"  SLURM CLUSTER SITREP | {timestamp}")
+    lines.append("=" * 70)
+    
+    # Node status
+    nodes = data['nodes']
+    lines.append("")
+    lines.append("NODE STATUS")
+    lines.append("-" * 70)
+    lines.append(f"  Total Nodes:    {nodes['total']:>6}")
+    lines.append(f"  Allocated:      {nodes['allocated']:>6}  (fully allocated)")
+    lines.append(f"  Mixed:          {nodes['mixed']:>6}  (partially allocated)")
+    lines.append(f"  Idle:           {nodes['idle']:>6}  (available)")
+    lines.append(f"  Drain:          {nodes['drain']:>6}  (draining/drained)")
+    lines.append(f"  Down:           {nodes['down']:>6}  (unavailable)")
+    if nodes['reserved'] > 0:
+        lines.append(f"  Reserved:       {nodes['reserved']:>6}")
+    if nodes['other'] > 0:
+        lines.append(f"  Other:          {nodes['other']:>6}")
+    
+    # Job status
+    jobs = data['jobs']
+    lines.append("")
+    lines.append("JOB QUEUE")
+    lines.append("-" * 70)
+    lines.append(f"  Running Jobs:   {jobs['running']:>6}")
+    lines.append(f"  Pending Jobs:   {jobs['pending']:>6}")
+    lines.append(f"  Total Jobs:     {jobs['total']:>6}")
+    
+    # Resources requested (running jobs)
+    res = data['resources_requested']
+    lines.append("")
+    lines.append("RESOURCES IN USE (Running Jobs)")
+    lines.append("-" * 70)
+    lines.append(f"  CPUs:           {res['cpus']:>6}")
+    lines.append(f"  Memory:         {res['memory_human']:>6}")
+    lines.append(f"  GPUs:           {res['gpus']:>6}")
+    
+    # Top users
+    top_users = data['top_users']
+    if top_users:
+        lines.append("")
+        lines.append("TOP 3 USERS (by running jobs)")
+        lines.append("-" * 70)
+        lines.append(f"  {'User':<15} {'Jobs':>8} {'CPUs':>8} {'Memory':>10} {'GPUs':>6}")
+        lines.append("  " + "-" * 49)
+        for user in top_users:
+            mem = _format_memory_short(user['memory'])
+            lines.append(f"  {user['user']:<15} {user['running_jobs']:>8} {user['cpus']:>8} {mem:>10} {user['gpus']:>6}")
+    
+    # Partition breakdown
+    partitions = data.get('partitions', {})
+    if partitions:
+        lines.append("")
+        lines.append("PARTITION BREAKDOWN")
+        lines.append("-" * 70)
+        lines.append(f"  {'Partition':<20} {'Running':>8} {'Pending':>8} {'CPUs':>8} {'Memory':>10} {'GPUs':>6}")
+        lines.append("  " + "-" * 62)
+        for part_name, part_data in sorted(partitions.items()):
+            mem = _format_memory_short(part_data['memory'])
+            lines.append(
+                f"  {part_name:<20} {part_data['running']:>8} {part_data['pending']:>8} "
+                f"{part_data['cpus']:>8} {mem:>10} {part_data['gpus']:>6}"
+            )
+    
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("")
+    
+    return "\n".join(lines)
+
+
+def _format_sitrep_html(data: Dict[str, Any]) -> str:
+    """Format sitrep as HTML."""
+    timestamp = datetime.fromisoformat(data['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+    nodes = data['nodes']
+    jobs = data['jobs']
+    res = data['resources_requested']
+    top_users = data['top_users']
+    partitions = data.get('partitions', {})
+    
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slurm Cluster Sitrep</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        .timestamp {{
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 20px;
+        }}
+        .section {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .section h2 {{
+            margin-top: 0;
+            color: #2c3e50;
+            font-size: 1.2em;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }}
+        .stat-box {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }}
+        .stat-value {{
+            font-size: 2em;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+        .stat-label {{
+            color: #666;
+            font-size: 0.85em;
+            margin-top: 5px;
+        }}
+        .stat-good {{ color: #27ae60; }}
+        .stat-warning {{ color: #f39c12; }}
+        .stat-danger {{ color: #e74c3c; }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }}
+        th, td {{
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }}
+        th {{
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #2c3e50;
+        }}
+        tr:hover {{
+            background: #f8f9fa;
+        }}
+        .user-rank {{
+            width: 30px;
+            text-align: center;
+        }}
+        .rank-1 {{ color: #f1c40f; font-weight: bold; }}
+        .rank-2 {{ color: #95a5a6; font-weight: bold; }}
+        .rank-3 {{ color: #cd6133; font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>\U0001F4CA Slurm Cluster Sitrep</h1>
+    <p class="timestamp">Generated: {timestamp}</p>
+    
+    <div class="section">
+        <h2>\U0001F5A5 Node Status</h2>
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value">{nodes['total']}</div>
+                <div class="stat-label">Total Nodes</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-good">{nodes['allocated']}</div>
+                <div class="stat-label">Allocated</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value" style="color:#3498db;">{nodes['mixed']}</div>
+                <div class="stat-label">Mixed</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-good">{nodes['idle']}</div>
+                <div class="stat-label">Idle</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-warning">{nodes['drain']}</div>
+                <div class="stat-label">Draining</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-danger">{nodes['down']}</div>
+                <div class="stat-label">Down</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>\U0001F4CB Job Queue</h2>
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value stat-good">{jobs['running']}</div>
+                <div class="stat-label">Running</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-warning">{jobs['pending']}</div>
+                <div class="stat-label">Pending</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{jobs['total']}</div>
+                <div class="stat-label">Total</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <h2>\U0001F4BB Resources In Use (Running Jobs)</h2>
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value">{res['cpus']}</div>
+                <div class="stat-label">CPUs</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{res['memory_human']}</div>
+                <div class="stat-label">Memory</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{res['gpus']}</div>
+                <div class="stat-label">GPUs</div>
+            </div>
+        </div>
+    </div>
+"""
+    
+    # Top users section
+    if top_users:
+        html += """    <div class="section">
+        <h2>\U0001F3C6 Top 3 Users (by running jobs)</h2>
+        <table>
+            <tr>
+                <th class="user-rank">#</th>
+                <th>User</th>
+                <th>Jobs</th>
+                <th>CPUs</th>
+                <th>Memory</th>
+                <th>GPUs</th>
+            </tr>
+"""
+        for i, user in enumerate(top_users, 1):
+            rank_class = f"rank-{i}" if i <= 3 else ""
+            mem = _format_memory_short(user['memory'])
+            html += f"""            <tr>
+                <td class="user-rank {rank_class}">{i}</td>
+                <td>{user['user']}</td>
+                <td>{user['running_jobs']}</td>
+                <td>{user['cpus']}</td>
+                <td>{mem}</td>
+                <td>{user['gpus']}</td>
+            </tr>
+"""
+        html += """        </table>
+    </div>
+"""
+    
+    # Partition breakdown
+    if partitions:
+        html += """    <div class="section">
+        <h2>\U0001F4C1 Partition Breakdown</h2>
+        <table>
+            <tr>
+                <th>Partition</th>
+                <th>Running</th>
+                <th>Pending</th>
+                <th>CPUs</th>
+                <th>Memory</th>
+                <th>GPUs</th>
+            </tr>
+"""
+        for part_name, part_data in sorted(partitions.items()):
+            mem = _format_memory_short(part_data['memory'])
+            html += f"""            <tr>
+                <td>{part_name}</td>
+                <td>{part_data['running']}</td>
+                <td>{part_data['pending']}</td>
+                <td>{part_data['cpus']}</td>
+                <td>{mem}</td>
+                <td>{part_data['gpus']}</td>
+            </tr>
+"""
+        html += """        </table>
+    </div>
+"""
+    
+    html += """</body>
+</html>
+"""
+    return html
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     """Generate efficiency report for a time period."""
     config = load_config(args.config)
@@ -2558,6 +3144,10 @@ Examples:
   schmutz leaderboard --days 30        Last 30 days
   schmutz leaderboard --sort waste     Rank by CPU hours wasted
   schmutz leaderboard --min-jobs 5     Only users with 5+ jobs
+
+  schmutz sitrep                       Show cluster status overview
+  schmutz sitrep --format json         Output as JSON
+  schmutz sitrep --format html -o status.html  Generate HTML report
 """
     )
 
@@ -2622,6 +3212,15 @@ Examples:
     lb_parser.add_argument('--quiet', '-q', action='store_true',
                            help='Suppress progress messages')
     lb_parser.set_defaults(func=cmd_leaderboard)
+
+    # Sitrep subcommand - cluster status overview
+    sitrep_parser = subparsers.add_parser('sitrep', help='Show cluster status overview')
+    sitrep_parser.add_argument('--format', '-f', choices=['text', 'json', 'html'],
+                               default='text', help='Output format (default: text)')
+    sitrep_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    sitrep_parser.add_argument('--quiet', '-q', action='store_true',
+                               help='Suppress progress messages')
+    sitrep_parser.set_defaults(func=cmd_sitrep)
 
     return parser
 
