@@ -2963,84 +2963,62 @@ def _format_sitrep_markdown(data: Dict[str, Any]) -> str:
 
 def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
     """Format sitrep as Markdown with embedded HTML for enhanced display."""
-    timestamp = datetime.fromisoformat(data['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.fromisoformat(data['timestamp']).strftime("%y-%m-%d %H:%M:%S")
     nodes = data['nodes']
     jobs = data['jobs']
     res = data['resources_requested']
     top_users = data['top_users']
     partitions = data.get('partitions', {})
     
-    md = f"""## \U0001F4CA Slurm Cluster Sitrep
+    # Build top users string
+    top_users_str = ""
+    if top_users:
+        top_users_str = " | ".join([f"**{u['user']}** ({u['running_jobs']} jobs)" for u in top_users[:3]])
+    
+    md = f"""## \U0001F4CA Cluster Sitrep
 
 <style>
-.sitrep-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; }}
-.sitrep-stat {{ background: #f8f9fa; padding: 12px; border-radius: 6px; text-align: center; }}
-.sitrep-value {{ font-size: 1.5em; font-weight: bold; color: #2c3e50; }}
-.sitrep-label {{ font-size: 0.85em; color: #666; margin-top: 4px; }}
-.sitrep-good {{ color: #28a745; }}
-.sitrep-warning {{ color: #f39c12; }}
-.sitrep-danger {{ color: #e74c3c; }}
-.sitrep-table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
-.sitrep-table th {{ background: #005f85; color: white; padding: 8px 12px; text-align: left; }}
-.sitrep-table td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; }}
-.sitrep-table tr:hover {{ background: #f5f5f5; }}
+.sr-table {{ border-collapse: collapse; }}
+.sr-table th {{ background: #005f85; color: white; padding: 6px 10px; text-align: left; white-space: nowrap; }}
+.sr-table td {{ padding: 6px 10px; border-bottom: 1px solid #ddd; white-space: nowrap; }}
+.sr-table tr:hover {{ background: #f5f5f5; }}
+.sr-good {{ color: #28a745; font-weight: bold; }}
+.sr-warn {{ color: #f39c12; font-weight: bold; }}
+.sr-bad {{ color: #e74c3c; font-weight: bold; }}
+.sr-val {{ font-weight: bold; }}
 </style>
 
-<p style="color: #666; font-size: 0.9em;">Generated: {timestamp}</p>
+<details>
+<summary>Details</summary>
+<p><strong>Generated:</strong> {timestamp}</p>
+<p style="font-size: 0.85em; color: #555; margin: 8px 0;">Real-time cluster status from sinfo and squeue. <strong>Nodes:</strong> allocated=fully busy, mixed=partially used, idle=available. <strong>Resources:</strong> totals currently in use by running jobs.</p>
+</details>
 
-### \U0001F5A5 Node Status
-
-<div class="sitrep-grid">
-<div class="sitrep-stat"><div class="sitrep-value">{nodes['total']}</div><div class="sitrep-label">Total</div></div>
-<div class="sitrep-stat"><div class="sitrep-value sitrep-good">{nodes['allocated']}</div><div class="sitrep-label">Allocated</div></div>
-<div class="sitrep-stat"><div class="sitrep-value" style="color:#3498db;">{nodes['mixed']}</div><div class="sitrep-label">Mixed</div></div>
-<div class="sitrep-stat"><div class="sitrep-value sitrep-good">{nodes['idle']}</div><div class="sitrep-label">Idle</div></div>
-<div class="sitrep-stat"><div class="sitrep-value sitrep-warning">{nodes['drain']}</div><div class="sitrep-label">Drain</div></div>
-<div class="sitrep-stat"><div class="sitrep-value sitrep-danger">{nodes['down']}</div><div class="sitrep-label">Down</div></div>
-</div>
-
-### \U0001F4CB Job Queue
-
-<div class="sitrep-grid">
-<div class="sitrep-stat"><div class="sitrep-value sitrep-good">{jobs['running']}</div><div class="sitrep-label">Running</div></div>
-<div class="sitrep-stat"><div class="sitrep-value sitrep-warning">{jobs['pending']}</div><div class="sitrep-label">Pending</div></div>
-<div class="sitrep-stat"><div class="sitrep-value">{jobs['total']}</div><div class="sitrep-label">Total</div></div>
-</div>
-
-### \U0001F4BB Resources In Use
-
-<div class="sitrep-grid">
-<div class="sitrep-stat"><div class="sitrep-value">{res['cpus']}</div><div class="sitrep-label">CPUs</div></div>
-<div class="sitrep-stat"><div class="sitrep-value">{res['memory_human']}</div><div class="sitrep-label">Memory</div></div>
-<div class="sitrep-stat"><div class="sitrep-value">{res['gpus']}</div><div class="sitrep-label">GPUs</div></div>
-</div>
+<table class="sr-table">
+<tr><th>Nodes</th><th>Jobs</th><th>Resources (in use)</th><th>Top Users</th></tr>
+<tr>
+<td><span class="sr-val">{nodes['total']}</span> total: <span class="sr-good">{nodes['allocated']}</span> alloc, <span style="color:#3498db;font-weight:bold;">{nodes['mixed']}</span> mix, <span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-warn">{nodes['drain']}</span> drain, <span class="sr-bad">{nodes['down']}</span> down</td>
+<td><span class="sr-good">{jobs['running']}</span> run, <span class="sr-warn">{jobs['pending']}</span> pend</td>
+<td><span class="sr-val">{res['cpus']}</span> CPU, <span class="sr-val">{res['memory_human']}</span> mem, <span class="sr-val">{res['gpus']}</span> GPU</td>
+<td>{top_users_str if top_users_str else "—"}</td>
+</tr>
+</table>
 """
     
-    # Top users
-    if top_users:
-        md += """
-### \U0001F3C6 Top 3 Users
-
-<table class="sitrep-table">
-<tr><th>#</th><th>User</th><th>Jobs</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
-"""
-        for i, user in enumerate(top_users, 1):
-            mem = _format_memory_short(user['memory'])
-            md += f"<tr><td>{i}</td><td>{user['user']}</td><td>{user['running_jobs']}</td><td>{user['cpus']}</td><td>{mem}</td><td>{user['gpus']}</td></tr>\n"
-        md += "</table>\n"
-    
-    # Partition breakdown
+    # Partition breakdown in collapsible details
     if partitions:
         md += """
-### \U0001F4C1 Partition Breakdown
-
-<table class="sitrep-table">
+<details>
+<summary>Partition breakdown</summary>
+<table class="sr-table">
 <tr><th>Partition</th><th>Running</th><th>Pending</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
 """
         for part_name, part_data in sorted(partitions.items()):
             mem = _format_memory_short(part_data['memory'])
             md += f"<tr><td>{part_name}</td><td>{part_data['running']}</td><td>{part_data['pending']}</td><td>{part_data['cpus']}</td><td>{mem}</td><td>{part_data['gpus']}</td></tr>\n"
-        md += "</table>\n"
+        md += """</table>
+</details>
+"""
     
     return md
 
