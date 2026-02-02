@@ -2312,11 +2312,26 @@ def cmd_sitrep(args: argparse.Namespace) -> int:
     # Get node status from sinfo
     node_info = _get_node_info(config, job_stats_helper)
     
+    # Get total cluster resources
+    cluster_resources = _get_cluster_resources(config, job_stats_helper)
+    
     # Get job queue status from squeue
     queue_info = _get_queue_info(config, job_stats_helper)
     
     # Get top users
     top_users = _get_top_users(queue_info.get('jobs', []))
+    
+    # Calculate resource percentages
+    in_use_cpus = queue_info.get('total_cpus', 0)
+    in_use_memory = queue_info.get('total_memory', 0)
+    in_use_gpus = queue_info.get('total_gpus', 0)
+    total_cpus = cluster_resources.get('total_cpus', 0)
+    total_memory = cluster_resources.get('total_memory', 0)
+    total_gpus = cluster_resources.get('total_gpus', 0)
+    
+    cpu_pct = (in_use_cpus / total_cpus * 100) if total_cpus > 0 else 0
+    mem_pct = (in_use_memory / total_memory * 100) if total_memory > 0 else 0
+    gpu_pct = (in_use_gpus / total_gpus * 100) if total_gpus > 0 else 0
     
     # Build sitrep data
     sitrep_data = {
@@ -2328,10 +2343,21 @@ def cmd_sitrep(args: argparse.Namespace) -> int:
             'total': queue_info.get('total', 0),
         },
         'resources_requested': {
-            'cpus': queue_info.get('total_cpus', 0),
-            'memory_bytes': queue_info.get('total_memory', 0),
-            'memory_human': _format_memory_short(queue_info.get('total_memory', 0)),
-            'gpus': queue_info.get('total_gpus', 0),
+            'cpus': in_use_cpus,
+            'memory_bytes': in_use_memory,
+            'memory_human': _format_memory_short(in_use_memory),
+            'gpus': in_use_gpus,
+        },
+        'resources_total': {
+            'cpus': total_cpus,
+            'memory_bytes': total_memory,
+            'memory_human': _format_memory_short(total_memory),
+            'gpus': total_gpus,
+        },
+        'resources_pct': {
+            'cpus': cpu_pct,
+            'memory': mem_pct,
+            'gpus': gpu_pct,
         },
         'top_users': top_users,
         'partitions': queue_info.get('partitions', {}),
@@ -2437,6 +2463,74 @@ def _get_node_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
             node_info['by_partition'][partition]['other'] += nodes
     
     return node_info
+
+
+def _get_cluster_resources(config: Config, job_stats: JobStats) -> Dict[str, Any]:
+    """Get total cluster resources from sinfo."""
+    resources = {
+        'total_cpus': 0,
+        'total_memory': 0,
+        'total_gpus': 0,
+    }
+    
+    # Run sinfo to get per-node resources
+    # Format: NODELIST|CPUS|MEMORY|GRES|STATE
+    cmd = [
+        config.slurm.sinfo_path,
+        '--noheader',
+        '-N',  # Node-centric view
+        '-o', '%N|%c|%m|%G|%T'
+    ]
+    
+    stdout, stderr, rc = job_stats._run_command(cmd)
+    if rc != 0:
+        logger.warning(f"sinfo command failed for resources: {stderr}")
+        return resources
+    
+    seen_nodes = set()  # Avoid counting nodes multiple times (they appear per partition)
+    
+    for line in stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split('|')
+        if len(parts) < 5:
+            continue
+        
+        nodename = parts[0]
+        if nodename in seen_nodes:
+            continue
+        seen_nodes.add(nodename)
+        
+        # Skip down/drain nodes for capacity calculation
+        state = parts[4].lower()
+        if 'down' in state or 'drain' in state:
+            continue
+        
+        try:
+            cpus = int(parts[1])
+        except ValueError:
+            cpus = 0
+        
+        # Memory is in MB from sinfo
+        try:
+            memory_mb = int(parts[2])
+            memory_bytes = memory_mb * 1024 * 1024
+        except ValueError:
+            memory_bytes = 0
+        
+        # Parse GPUs from GRES
+        gpus = 0
+        gres_str = parts[3]
+        if gres_str and gres_str != '(null)':
+            gpu_match = re.search(r'gpu[^:]*:(\d+)', gres_str.lower())
+            if gpu_match:
+                gpus = int(gpu_match.group(1))
+        
+        resources['total_cpus'] += cpus
+        resources['total_memory'] += memory_bytes
+        resources['total_gpus'] += gpus
+    
+    return resources
 
 
 def _get_queue_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
@@ -2967,11 +3061,22 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
     nodes = data['nodes']
     jobs = data['jobs']
     res = data['resources_requested']
+    res_total = data.get('resources_total', {'cpus': 0, 'memory_bytes': 0, 'memory_human': '0', 'gpus': 0})
+    res_pct = data.get('resources_pct', {'cpus': 0, 'memory': 0, 'gpus': 0})
     top_users = data['top_users']
     partitions = data.get('partitions', {})
     
     # Build top users summary string
     top_users_summary = "None" if not top_users else ", ".join([u['user'] for u in top_users[:3]])
+    
+    # Color class based on utilization percentage
+    def pct_class(pct):
+        if pct >= 80:
+            return 'sr-good'
+        elif pct >= 50:
+            return 'sr-blue'
+        else:
+            return 'sr-warn'
     
     md = f"""## \U0001F4CA Cluster Sitrep
 
@@ -2986,6 +3091,16 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
 .sr-val {{ font-weight: bold; }}
 .sr-blue {{ color: #3498db; font-weight: bold; }}
 </style>
+
+<details open>
+<summary>\U0001F4BB <strong>Resources</strong> — <span class="{pct_class(res_pct['cpus'])}">{res_pct['cpus']:.0f}%</span> CPU, <span class="{pct_class(res_pct['memory'])}">{res_pct['memory']:.0f}%</span> mem, <span class="{pct_class(res_pct['gpus'])}">{res_pct['gpus']:.0f}%</span> GPU</summary>
+<table class="sr-table">
+<tr><th>Resource</th><th>In Use</th><th>Total</th><th>%</th></tr>
+<tr><td>CPUs</td><td class="sr-val">{res['cpus']}</td><td>{res_total['cpus']}</td><td class="{pct_class(res_pct['cpus'])}">{res_pct['cpus']:.1f}%</td></tr>
+<tr><td>Memory</td><td class="sr-val">{res['memory_human']}</td><td>{res_total['memory_human']}</td><td class="{pct_class(res_pct['memory'])}">{res_pct['memory']:.1f}%</td></tr>
+<tr><td>GPUs</td><td class="sr-val">{res['gpus']}</td><td>{res_total['gpus']}</td><td class="{pct_class(res_pct['gpus'])}">{res_pct['gpus']:.1f}%</td></tr>
+</table>
+</details>
 
 <details>
 <summary>\U0001F5A5 <strong>Nodes</strong> — {nodes['total']} total (<span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-bad">{nodes['down']}</span> down)</summary>
@@ -3007,17 +3122,6 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
 <tr><td>Running</td><td class="sr-good">{jobs['running']}</td></tr>
 <tr><td>Pending</td><td class="sr-warn">{jobs['pending']}</td></tr>
 <tr><td>Total</td><td class="sr-val">{jobs['total']}</td></tr>
-</table>
-</details>
-
-<details>
-<summary>\U0001F4BB <strong>Resources</strong> — {res['cpus']} CPUs, {res['memory_human']} mem, {res['gpus']} GPUs in use</summary>
-<p style="font-size: 0.85em; color: #555; margin: 8px 0;">Resources currently allocated to running jobs:</p>
-<table class="sr-table">
-<tr><th>Resource</th><th>In Use</th></tr>
-<tr><td>CPUs</td><td class="sr-val">{res['cpus']}</td></tr>
-<tr><td>Memory</td><td class="sr-val">{res['memory_human']}</td></tr>
-<tr><td>GPUs</td><td class="sr-val">{res['gpus']}</td></tr>
 </table>
 </details>
 
