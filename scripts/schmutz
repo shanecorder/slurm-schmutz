@@ -2342,6 +2342,10 @@ def cmd_sitrep(args: argparse.Namespace) -> int:
         output = json.dumps(sitrep_data, indent=2)
     elif args.format == 'html':
         output = _format_sitrep_html(sitrep_data)
+    elif args.format == 'markdown':
+        output = _format_sitrep_markdown(sitrep_data)
+    elif args.format == 'mdhtml':
+        output = _format_sitrep_mdhtml(sitrep_data)
     else:
         output = _format_sitrep_text(sitrep_data)
     
@@ -2880,6 +2884,167 @@ def _format_sitrep_html(data: Dict[str, Any]) -> str:
     return html
 
 
+def _format_sitrep_markdown(data: Dict[str, Any]) -> str:
+    """Format sitrep as Markdown."""
+    timestamp = datetime.fromisoformat(data['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+    nodes = data['nodes']
+    jobs = data['jobs']
+    res = data['resources_requested']
+    top_users = data['top_users']
+    partitions = data.get('partitions', {})
+    
+    lines = []
+    lines.append(f"# \U0001F4CA Slurm Cluster Sitrep")
+    lines.append("")
+    lines.append(f"**Generated:** {timestamp}")
+    lines.append("")
+    
+    # Node status
+    lines.append("## \U0001F5A5 Node Status")
+    lines.append("")
+    lines.append("| Status | Count | Description |")
+    lines.append("|--------|------:|-------------|")
+    lines.append(f"| Total | {nodes['total']} | All nodes |")
+    lines.append(f"| Allocated | {nodes['allocated']} | Fully allocated |")
+    lines.append(f"| Mixed | {nodes['mixed']} | Partially allocated |")
+    lines.append(f"| Idle | {nodes['idle']} | Available |")
+    lines.append(f"| Drain | {nodes['drain']} | Draining/drained |")
+    lines.append(f"| Down | {nodes['down']} | Unavailable |")
+    if nodes['reserved'] > 0:
+        lines.append(f"| Reserved | {nodes['reserved']} | Reserved |")
+    if nodes['other'] > 0:
+        lines.append(f"| Other | {nodes['other']} | Other states |")
+    lines.append("")
+    
+    # Job queue
+    lines.append("## \U0001F4CB Job Queue")
+    lines.append("")
+    lines.append("| Status | Count |")
+    lines.append("|--------|------:|")
+    lines.append(f"| Running | {jobs['running']} |")
+    lines.append(f"| Pending | {jobs['pending']} |")
+    lines.append(f"| Total | {jobs['total']} |")
+    lines.append("")
+    
+    # Resources in use
+    lines.append("## \U0001F4BB Resources In Use (Running Jobs)")
+    lines.append("")
+    lines.append("| Resource | Amount |")
+    lines.append("|----------|-------:|")
+    lines.append(f"| CPUs | {res['cpus']} |")
+    lines.append(f"| Memory | {res['memory_human']} |")
+    lines.append(f"| GPUs | {res['gpus']} |")
+    lines.append("")
+    
+    # Top users
+    if top_users:
+        lines.append("## \U0001F3C6 Top 3 Users (by running jobs)")
+        lines.append("")
+        lines.append("| # | User | Jobs | CPUs | Memory | GPUs |")
+        lines.append("|---|------|-----:|-----:|-------:|-----:|")
+        for i, user in enumerate(top_users, 1):
+            mem = _format_memory_short(user['memory'])
+            lines.append(f"| {i} | {user['user']} | {user['running_jobs']} | {user['cpus']} | {mem} | {user['gpus']} |")
+        lines.append("")
+    
+    # Partition breakdown
+    if partitions:
+        lines.append("## \U0001F4C1 Partition Breakdown")
+        lines.append("")
+        lines.append("| Partition | Running | Pending | CPUs | Memory | GPUs |")
+        lines.append("|-----------|--------:|--------:|-----:|-------:|-----:|")
+        for part_name, part_data in sorted(partitions.items()):
+            mem = _format_memory_short(part_data['memory'])
+            lines.append(f"| {part_name} | {part_data['running']} | {part_data['pending']} | {part_data['cpus']} | {mem} | {part_data['gpus']} |")
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
+    """Format sitrep as Markdown with embedded HTML for enhanced display."""
+    timestamp = datetime.fromisoformat(data['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+    nodes = data['nodes']
+    jobs = data['jobs']
+    res = data['resources_requested']
+    top_users = data['top_users']
+    partitions = data.get('partitions', {})
+    
+    md = f"""## \U0001F4CA Slurm Cluster Sitrep
+
+<style>
+.sitrep-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 10px 0; }}
+.sitrep-stat {{ background: #f8f9fa; padding: 12px; border-radius: 6px; text-align: center; }}
+.sitrep-value {{ font-size: 1.5em; font-weight: bold; color: #2c3e50; }}
+.sitrep-label {{ font-size: 0.85em; color: #666; margin-top: 4px; }}
+.sitrep-good {{ color: #28a745; }}
+.sitrep-warning {{ color: #f39c12; }}
+.sitrep-danger {{ color: #e74c3c; }}
+.sitrep-table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+.sitrep-table th {{ background: #005f85; color: white; padding: 8px 12px; text-align: left; }}
+.sitrep-table td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; }}
+.sitrep-table tr:hover {{ background: #f5f5f5; }}
+</style>
+
+<p style="color: #666; font-size: 0.9em;">Generated: {timestamp}</p>
+
+### \U0001F5A5 Node Status
+
+<div class="sitrep-grid">
+<div class="sitrep-stat"><div class="sitrep-value">{nodes['total']}</div><div class="sitrep-label">Total</div></div>
+<div class="sitrep-stat"><div class="sitrep-value sitrep-good">{nodes['allocated']}</div><div class="sitrep-label">Allocated</div></div>
+<div class="sitrep-stat"><div class="sitrep-value" style="color:#3498db;">{nodes['mixed']}</div><div class="sitrep-label">Mixed</div></div>
+<div class="sitrep-stat"><div class="sitrep-value sitrep-good">{nodes['idle']}</div><div class="sitrep-label">Idle</div></div>
+<div class="sitrep-stat"><div class="sitrep-value sitrep-warning">{nodes['drain']}</div><div class="sitrep-label">Drain</div></div>
+<div class="sitrep-stat"><div class="sitrep-value sitrep-danger">{nodes['down']}</div><div class="sitrep-label">Down</div></div>
+</div>
+
+### \U0001F4CB Job Queue
+
+<div class="sitrep-grid">
+<div class="sitrep-stat"><div class="sitrep-value sitrep-good">{jobs['running']}</div><div class="sitrep-label">Running</div></div>
+<div class="sitrep-stat"><div class="sitrep-value sitrep-warning">{jobs['pending']}</div><div class="sitrep-label">Pending</div></div>
+<div class="sitrep-stat"><div class="sitrep-value">{jobs['total']}</div><div class="sitrep-label">Total</div></div>
+</div>
+
+### \U0001F4BB Resources In Use
+
+<div class="sitrep-grid">
+<div class="sitrep-stat"><div class="sitrep-value">{res['cpus']}</div><div class="sitrep-label">CPUs</div></div>
+<div class="sitrep-stat"><div class="sitrep-value">{res['memory_human']}</div><div class="sitrep-label">Memory</div></div>
+<div class="sitrep-stat"><div class="sitrep-value">{res['gpus']}</div><div class="sitrep-label">GPUs</div></div>
+</div>
+"""
+    
+    # Top users
+    if top_users:
+        md += """
+### \U0001F3C6 Top 3 Users
+
+<table class="sitrep-table">
+<tr><th>#</th><th>User</th><th>Jobs</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
+"""
+        for i, user in enumerate(top_users, 1):
+            mem = _format_memory_short(user['memory'])
+            md += f"<tr><td>{i}</td><td>{user['user']}</td><td>{user['running_jobs']}</td><td>{user['cpus']}</td><td>{mem}</td><td>{user['gpus']}</td></tr>\n"
+        md += "</table>\n"
+    
+    # Partition breakdown
+    if partitions:
+        md += """
+### \U0001F4C1 Partition Breakdown
+
+<table class="sitrep-table">
+<tr><th>Partition</th><th>Running</th><th>Pending</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
+"""
+        for part_name, part_data in sorted(partitions.items()):
+            mem = _format_memory_short(part_data['memory'])
+            md += f"<tr><td>{part_name}</td><td>{part_data['running']}</td><td>{part_data['pending']}</td><td>{part_data['cpus']}</td><td>{mem}</td><td>{part_data['gpus']}</td></tr>\n"
+        md += "</table>\n"
+    
+    return md
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     """Generate efficiency report for a time period."""
     config = load_config(args.config)
@@ -3215,7 +3380,7 @@ Examples:
 
     # Sitrep subcommand - cluster status overview
     sitrep_parser = subparsers.add_parser('sitrep', help='Show cluster status overview')
-    sitrep_parser.add_argument('--format', '-f', choices=['text', 'json', 'html'],
+    sitrep_parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
                                default='text', help='Output format (default: text)')
     sitrep_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
     sitrep_parser.add_argument('--quiet', '-q', action='store_true',
