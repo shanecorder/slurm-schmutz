@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#
+# =====================================================
+#  merge-motd — Build motd.html.md automatically
+#  For Open OnDemand apps serving Markdown via .html.md
+# =====================================================
+
+set -euo pipefail
+
+# Directory of the OOD app's Markdown files
+# Adjust this if your files live elsewhere
+APPDIR="${APPDIR:-/etc/ood/config/motd.d}"
+
+# Input files
+LEADERBOARD="$APPDIR/leaderboard.html.md"
+SITREP="$APPDIR/sitrep.html.md"
+
+# Output file
+MOTD="$APPDIR/motd.html.md"
+
+# Temporary file for safe atomic replacement
+TMPFILE="$(mktemp)"
+trap 'rm -f "$TMPFILE"' EXIT
+
+# ---- Build Header ----
+{
+  echo "<!-- motd.html.md (auto-generated - do not edit) -->"
+  echo
+} > "$TMPFILE"
+
+# ---- Include Sitrep (cluster status first) ----
+if [[ -f "$SITREP" ]]; then
+  cat "$SITREP" >> "$TMPFILE"
+else
+  echo "## 📊 Cluster Sitrep" >> "$TMPFILE"
+  echo >> "$TMPFILE"
+  echo "_Sitrep data not available._" >> "$TMPFILE"
+fi
+
+echo >> "$TMPFILE"
+echo "---" >> "$TMPFILE"
+echo >> "$TMPFILE"
+
+# ---- Include Leaderboard ----
+if [[ -f "$LEADERBOARD" ]]; then
+  cat "$LEADERBOARD" >> "$TMPFILE"
+else
+  echo "## 🏆 Efficiency Leaders" >> "$TMPFILE"
+  echo >> "$TMPFILE"
+  echo "_Leaderboard data not available._" >> "$TMPFILE"
+fi
+
+# ---- Atomically replace motd.html.md ----
+mv "$TMPFILE" "$MOTD"
+chmod 644 "$MOTD"
+
+echo "✅ motd.html.md updated at $(date -u)"
