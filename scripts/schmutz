@@ -3373,9 +3373,9 @@ details > summary .sr-blue {{ color: #87CEEB; }}
         num_nodes = len(node_details)
         md += f"""
 <details>
-<summary><strong>Node Details</strong> — {num_nodes} node{"s" if num_nodes != 1 else ""}</summary>
+<summary><strong>Unused Resc</strong> — {num_nodes} node{"s" if num_nodes != 1 else ""}</summary>
 <table class="sr-table">
-<tr><th>Node</th><th>State</th><th>CPUs Free</th><th>Mem Free</th><th>GPUs Free</th></tr>
+<tr><th>Node</th><th>State</th><th>CPUs</th><th>Mem</th><th>GPUs</th></tr>
 """
         for node in node_details:
             mem_avail = _format_memory_short(node['mem_avail_mb'] * 1024 * 1024)
