@@ -1971,7 +1971,7 @@ def _format_leaderboard_text(leaders: List[Dict], laggards: List[Dict], start_st
     if laggards:
         lines.append("")
         lines.append("=" * 120)
-        lines.append(f"  ⚠️  Low Efficiency Users | {start_str} to {end_str} ({days} days)")
+        lines.append(f"  ⚠️  Low Efficiency | {start_str} to {end_str} ({days} days)")
         lines.append("=" * 120)
         lines.append("")
         lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Req':>9} {'CPU Use':>9} {'CPU Eff':>9} {'Mem Req':>10} {'Mem Use':>10} {'Mem Eff':>9} {'Score':>9}")
@@ -2032,7 +2032,7 @@ def _format_leaderboard_markdown(leaders: List[Dict], laggards: List[Dict], star
         lines.append("")
     
     if laggards:
-        lines.append(f"# ⚠️ Low Efficiency Users")
+        lines.append(f"# ⚠️ Low Efficiency")
         lines.append("")
         if not leaders:
             lines.append(f"**Period:** {start_str} to {end_str} ({days} days)")
@@ -2137,7 +2137,7 @@ def _format_leaderboard_mdhtml(leaders: List[Dict], laggards: List[Dict], start_
     
     # Laggards section
     if laggards:
-        md += f"""## ⚠️ Low Efficiency Users
+        md += f"""## ⚠️ Low Efficiency
 
 """
         if not leaders:
@@ -2287,7 +2287,7 @@ def _format_leaderboard_html(leaders: List[Dict], laggards: List[Dict], start_st
     
     # Laggards section
     if laggards:
-        html += f"""    <h3 class="laggards">\\u26A0\\uFE0F Low Efficiency Users</h3>
+        html += f"""    <h3 class="laggards">\\u26A0\\uFE0F Low Efficiency</h3>
 """
         if not leaders:
             html += f"""    
