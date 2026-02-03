@@ -2315,6 +2315,9 @@ def cmd_sitrep(args: argparse.Namespace) -> int:
     # Get total cluster resources
     cluster_resources = _get_cluster_resources(config, job_stats_helper)
     
+    # Get per-node details
+    node_details = _get_node_details(config, job_stats_helper)
+    
     # Get job queue status from squeue
     queue_info = _get_queue_info(config, job_stats_helper)
     
@@ -2361,6 +2364,7 @@ def cmd_sitrep(args: argparse.Namespace) -> int:
         },
         'top_users': top_users,
         'partitions': queue_info.get('partitions', {}),
+        'node_details': node_details,
     }
     
     # Format output
@@ -2531,6 +2535,106 @@ def _get_cluster_resources(config: Config, job_stats: JobStats) -> Dict[str, Any
         resources['total_gpus'] += gpus
     
     return resources
+
+
+def _get_node_details(config: Config, job_stats: JobStats) -> List[Dict[str, Any]]:
+    """Get per-node resource availability from sinfo."""
+    nodes = []
+    
+    # Run sinfo to get per-node resources with allocation info
+    # Format: NODELIST|CPUS|CPUS_ALLOC|MEMORY|FREE_MEM|GRES|GRES_USED|STATE
+    cmd = [
+        config.slurm.sinfo_path,
+        '--noheader',
+        '-N',  # Node-centric view
+        '-o', '%N|%c|%C|%m|%e|%G|%b|%T'
+    ]
+    
+    stdout, stderr, rc = job_stats._run_command(cmd)
+    if rc != 0:
+        logger.warning(f"sinfo command failed for node details: {stderr}")
+        return nodes
+    
+    seen_nodes = set()  # Avoid counting nodes multiple times (they appear per partition)
+    
+    for line in stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split('|')
+        if len(parts) < 8:
+            continue
+        
+        nodename = parts[0]
+        if nodename in seen_nodes:
+            continue
+        seen_nodes.add(nodename)
+        
+        state = parts[7].lower()
+        
+        # Parse total CPUs
+        try:
+            total_cpus = int(parts[1])
+        except ValueError:
+            total_cpus = 0
+        
+        # Parse CPU allocation info: A/I/O/T format (Allocated/Idle/Other/Total)
+        cpus_alloc = 0
+        cpus_avail = total_cpus
+        cpu_info = parts[2]
+        if '/' in cpu_info:
+            cpu_parts = cpu_info.split('/')
+            if len(cpu_parts) >= 2:
+                try:
+                    cpus_alloc = int(cpu_parts[0])
+                    cpus_avail = int(cpu_parts[1]) if len(cpu_parts) > 1 else total_cpus - cpus_alloc
+                except ValueError:
+                    cpus_avail = total_cpus
+        
+        # Parse total memory (in MB from sinfo)
+        try:
+            total_memory_mb = int(parts[3])
+        except ValueError:
+            total_memory_mb = 0
+        
+        # Parse free memory (in MB from sinfo)
+        try:
+            free_memory_mb = int(parts[4]) if parts[4] and parts[4] != 'N/A' else total_memory_mb
+        except ValueError:
+            free_memory_mb = total_memory_mb
+        
+        # Parse total GPUs from GRES
+        total_gpus = 0
+        gres_str = parts[5]
+        if gres_str and gres_str != '(null)':
+            gpu_match = re.search(r'gpu[^:]*:(\d+)', gres_str.lower())
+            if gpu_match:
+                total_gpus = int(gpu_match.group(1))
+        
+        # Parse used GPUs from GRES_USED
+        used_gpus = 0
+        gres_used_str = parts[6]
+        if gres_used_str and gres_used_str != '(null)':
+            gpu_used_match = re.search(r'gpu[^:]*:(\d+)', gres_used_str.lower())
+            if gpu_used_match:
+                used_gpus = int(gpu_used_match.group(1))
+        
+        avail_gpus = max(0, total_gpus - used_gpus)
+        
+        nodes.append({
+            'name': nodename,
+            'state': state,
+            'cpus_total': total_cpus,
+            'cpus_avail': cpus_avail,
+            'mem_total_mb': total_memory_mb,
+            'mem_avail_mb': free_memory_mb,
+            'gpus_total': total_gpus,
+            'gpus_avail': avail_gpus,
+        })
+    
+    # Sort by node name
+    nodes.sort(key=lambda x: x['name'])
+    
+    return nodes
 
 
 def _get_queue_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
@@ -3161,6 +3265,44 @@ details > summary .sr-blue {{ color: #87CEEB; }}
         for part_name, part_data in sorted(partitions.items()):
             mem = _format_memory_short(part_data['memory'])
             md += f"<tr><td>{part_name}</td><td>{part_data['running']}</td><td>{part_data['pending']}</td><td>{part_data['cpus']}</td><td>{mem}</td><td>{part_data['gpus']}</td></tr>\n"
+        md += """</table>
+</details>
+"""
+    
+    # Node details breakdown
+    node_details = data.get('node_details', [])
+    if node_details:
+        num_nodes = len(node_details)
+        md += f"""
+<details>
+<summary>\U0001F4E6 <strong>Node Details</strong> — {num_nodes} node{"s" if num_nodes != 1 else ""}</summary>
+<table class="sr-table">
+<tr><th>Node</th><th>State</th><th>CPUs Avail</th><th>Mem Avail</th><th>GPUs Avail</th></tr>
+"""
+        for node in node_details:
+            mem_avail = _format_memory_short(node['mem_avail_mb'] * 1024 * 1024)
+            mem_total = _format_memory_short(node['mem_total_mb'] * 1024 * 1024)
+            
+            # Color code state
+            state = node['state']
+            if 'idle' in state:
+                state_class = 'sr-good'
+            elif 'mix' in state:
+                state_class = 'sr-blue'
+            elif 'alloc' in state:
+                state_class = 'sr-warn'
+            elif 'down' in state or 'drain' in state:
+                state_class = 'sr-bad'
+            else:
+                state_class = ''
+            
+            # Format GPU display
+            if node['gpus_total'] > 0:
+                gpu_str = f"{node['gpus_avail']}/{node['gpus_total']}"
+            else:
+                gpu_str = "-"
+            
+            md += f"<tr><td>{node['name']}</td><td class=\"{state_class}\">{state}</td><td>{node['cpus_avail']}/{node['cpus_total']}</td><td>{mem_avail}/{mem_total}</td><td>{gpu_str}</td></tr>\n"
         md += """</table>
 </details>
 """
