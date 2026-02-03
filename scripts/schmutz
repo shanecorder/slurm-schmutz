@@ -1868,6 +1868,11 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
     elif args.sort == 'jobs':
         leaderboard.sort(key=lambda x: x['jobs'], reverse=True)
     
+    # Apply exclude filter
+    if args.exclude:
+        excluded_users = set(u.strip() for u in args.exclude.split(','))
+        leaderboard = [u for u in leaderboard if u['user'] not in excluded_users]
+    
     # Apply minimum jobs filter
     if args.min_jobs > 0:
         leaderboard = [u for u in leaderboard if u['jobs'] >= args.min_jobs]
@@ -3736,6 +3741,8 @@ Examples:
                            help='Show both top N and bottom N users')
     lb_parser.add_argument('--min-jobs', '-m', type=int, default=0,
                            help='Minimum jobs to be included (default: 0)')
+    lb_parser.add_argument('--exclude', '-x', type=str,
+                           help='Comma-separated list of users to exclude')
     lb_parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
                            default='text', help='Output format (default: text)')
     lb_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
