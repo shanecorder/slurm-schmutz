@@ -2619,13 +2619,13 @@ def _get_cluster_resources(config: Config, job_stats: JobStats) -> Dict[str, Any
         except ValueError:
             memory_bytes = 0
         
-        # Parse GPUs from GRES
+        # Parse GPUs from GRES (handle multiple GPU types like gpu:a30:1,gpu:2g.12gb:2)
         gpus = 0
         gres_str = parts[3]
         if gres_str and gres_str != '(null)':
-            gpu_match = re.search(r'gpu[^:]*:(\d+)', gres_str.lower())
-            if gpu_match:
-                gpus = int(gpu_match.group(1))
+            # Use finditer to catch ALL gpu specifications
+            for gpu_match in re.finditer(r'gpu(?::[^:,()]+)?:(\d+)', gres_str.lower()):
+                gpus += int(gpu_match.group(1))
         
         resources['total_cpus'] += cpus
         resources['total_memory'] += memory_bytes
@@ -2807,12 +2807,12 @@ def _get_queue_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
         elif mem_str.endswith('c'):
             mem_bytes *= cpus
         
-        # Parse GPUs from GRES
+        # Parse GPUs from GRES (handle multiple GPU types)
         gpus = 0
         if gres_str and gres_str != '(null)':
-            gpu_match = re.search(r'gpu[^:]*:(\d+)', gres_str.lower())
-            if gpu_match:
-                gpus = int(gpu_match.group(1))
+            # Use finditer to catch ALL gpu specifications
+            for gpu_match in re.finditer(r'gpu(?::[^:,()]+)?:(\d+)', gres_str.lower()):
+                gpus += int(gpu_match.group(1))
         
         job_entry = {
             'job_id': job_id,
