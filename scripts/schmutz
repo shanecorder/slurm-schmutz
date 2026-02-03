@@ -2640,11 +2640,12 @@ def _get_node_details(config: Config, job_stats: JobStats) -> List[Dict[str, Any
     
     # Run sinfo to get per-node resources with allocation info
     # Format: NODELIST|CPUS|CPUS_ALLOC|MEMORY|FREE_MEM|GRES|GRES_USED|STATE
+    # %O is the correct format for GRES_USED (not %b which is active features)
     cmd = [
         config.slurm.sinfo_path,
         '--noheader',
         '-N',  # Node-centric view
-        '-o', '%N|%c|%C|%m|%e|%G|%b|%T'
+        '-o', '%N|%c|%C|%m|%e|%G|%O|%T'
     ]
     
     stdout, stderr, rc = job_stats._run_command(cmd)
