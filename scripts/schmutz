@@ -2602,21 +2602,22 @@ def _get_node_details(config: Config, job_stats: JobStats) -> List[Dict[str, Any
         except ValueError:
             free_memory_mb = total_memory_mb
         
-        # Parse total GPUs from GRES
+        # Parse total GPUs from GRES (format: gpu:type:count or gpu:count)
         total_gpus = 0
         gres_str = parts[5]
         if gres_str and gres_str != '(null)':
-            gpu_match = re.search(r'gpu[^:]*:(\d+)', gres_str.lower())
-            if gpu_match:
-                total_gpus = int(gpu_match.group(1))
+            # Match patterns like gpu:a30:1, gpu:2g.12gb:2, or gpu:1
+            # Look for gpu followed by optional type, then :count
+            for gpu_match in re.finditer(r'gpu(?::[^:,()]+)?:(\d+)', gres_str.lower()):
+                total_gpus += int(gpu_match.group(1))
         
         # Parse used GPUs from GRES_USED
         used_gpus = 0
         gres_used_str = parts[6]
         if gres_used_str and gres_used_str != '(null)':
-            gpu_used_match = re.search(r'gpu[^:]*:(\d+)', gres_used_str.lower())
-            if gpu_used_match:
-                used_gpus = int(gpu_used_match.group(1))
+            # Same pattern for used GPUs
+            for gpu_used_match in re.finditer(r'gpu(?::[^:,()]+)?:(\d+)', gres_used_str.lower()):
+                used_gpus += int(gpu_used_match.group(1))
         
         avail_gpus = max(0, total_gpus - used_gpus)
         
@@ -3277,11 +3278,10 @@ details > summary .sr-blue {{ color: #87CEEB; }}
 <details>
 <summary>\U0001F4E6 <strong>Node Details</strong> — {num_nodes} node{"s" if num_nodes != 1 else ""}</summary>
 <table class="sr-table">
-<tr><th>Node</th><th>State</th><th>CPUs Avail</th><th>Mem Avail</th><th>GPUs Avail</th></tr>
+<tr><th>Node</th><th>State</th><th>CPUs Free</th><th>Mem Free</th><th>GPUs Free</th></tr>
 """
         for node in node_details:
             mem_avail = _format_memory_short(node['mem_avail_mb'] * 1024 * 1024)
-            mem_total = _format_memory_short(node['mem_total_mb'] * 1024 * 1024)
             
             # Color code state
             state = node['state']
@@ -3296,13 +3296,13 @@ details > summary .sr-blue {{ color: #87CEEB; }}
             else:
                 state_class = ''
             
-            # Format GPU display
+            # Format GPU display - show free count or "-" if no GPUs on node
             if node['gpus_total'] > 0:
-                gpu_str = f"{node['gpus_avail']}/{node['gpus_total']}"
+                gpu_str = str(node['gpus_avail'])
             else:
                 gpu_str = "-"
             
-            md += f"<tr><td>{node['name']}</td><td class=\"{state_class}\">{state}</td><td>{node['cpus_avail']}/{node['cpus_total']}</td><td>{mem_avail}/{mem_total}</td><td>{gpu_str}</td></tr>\n"
+            md += f"<tr><td>{node['name']}</td><td class=\"{state_class}\">{state}</td><td>{node['cpus_avail']}</td><td>{mem_avail}</td><td>{gpu_str}</td></tr>\n"
         md += """</table>
 </details>
 """
