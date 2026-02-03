@@ -3312,7 +3312,7 @@ details > summary .sr-blue {{ color: #87CEEB; }}
 </table>
 
 <details>
-<summary>\U0001F5A5 <strong>Nodes</strong> — {nodes['total']} total (<span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-bad">{nodes['down']}</span> down)</summary>
+<summary><strong>Nodes</strong> — {nodes['total']} total (<span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-bad">{nodes['down']}</span> down)</summary>
 <table class="sr-table">
 <tr><th>State</th><th>Count</th><th>Description</th></tr>
 <tr><td>Total</td><td class="sr-val">{nodes['total']}</td><td>All nodes in cluster</td></tr>
@@ -3325,7 +3325,7 @@ details > summary .sr-blue {{ color: #87CEEB; }}
 </details>
 
 <details>
-<summary>\U0001F4CB <strong>Jobs</strong> — <span class="sr-good">{jobs['running']}</span> running, <span class="sr-warn">{jobs['pending']}</span> pending</summary>
+<summary><strong>Jobs</strong> — <span class="sr-good">{jobs['running']}</span> running, <span class="sr-warn">{jobs['pending']}</span> pending</summary>
 <table class="sr-table">
 <tr><th>State</th><th>Count</th></tr>
 <tr><td>Running</td><td class="sr-good">{jobs['running']}</td></tr>
@@ -3335,7 +3335,7 @@ details > summary .sr-blue {{ color: #87CEEB; }}
 </details>
 
 <details>
-<summary>\U0001F3C6 <strong>Top Users</strong> — {top_users_summary}</summary>
+<summary><strong>Top Users</strong> — {top_users_summary}</summary>
 """
     
     if top_users:
@@ -3356,7 +3356,7 @@ details > summary .sr-blue {{ color: #87CEEB; }}
         num_partitions = len(partitions)
         md += f"""
 <details>
-<summary>\U0001F4C1 <strong>Partitions</strong> — {num_partitions} partition{"s" if num_partitions != 1 else ""}</summary>
+<summary><strong>Partitions</strong> — {num_partitions} partition{"s" if num_partitions != 1 else ""}</summary>
 <table class="sr-table">
 <tr><th>Partition</th><th>Running</th><th>Pending</th><th>CPUs</th><th>Memory</th><th>GPUs</th></tr>
 """
@@ -3373,7 +3373,7 @@ details > summary .sr-blue {{ color: #87CEEB; }}
         num_nodes = len(node_details)
         md += f"""
 <details>
-<summary>\U0001F4E6 <strong>Node Details</strong> — {num_nodes} node{"s" if num_nodes != 1 else ""}</summary>
+<summary><strong>Node Details</strong> — {num_nodes} node{"s" if num_nodes != 1 else ""}</summary>
 <table class="sr-table">
 <tr><th>Node</th><th>State</th><th>CPUs Free</th><th>Mem Free</th><th>GPUs Free</th></tr>
 """
