@@ -1872,24 +1872,44 @@ def cmd_leaderboard(args: argparse.Namespace) -> int:
     if args.min_jobs > 0:
         leaderboard = [u for u in leaderboard if u['jobs'] >= args.min_jobs]
     
-    # Limit results
-    if args.top:
-        leaderboard = leaderboard[:args.top]
+    # Determine what to show: top, bottom, or both
+    top_list = []
+    bottom_list = []
+    
+    if args.show_both:
+        # Show both top N and bottom N
+        n = args.show_both
+        if len(leaderboard) > n * 2:
+            top_list = leaderboard[:n]
+            bottom_list = leaderboard[-n:]
+        else:
+            # Not enough users to split, just show all
+            top_list = leaderboard
+    elif args.bottom:
+        # Show only bottom N (worst)
+        bottom_list = leaderboard[-args.bottom:] if len(leaderboard) > args.bottom else leaderboard
+    elif args.top:
+        # Show only top N (best)
+        top_list = leaderboard[:args.top]
+    else:
+        # Default: show all as top (best efficiency first)
+        top_list = leaderboard
     
     # Output
     if args.format == 'json':
         output = json.dumps({
             'period': {'start': start_str, 'end': end_str, 'days': args.days},
-            'leaderboard': leaderboard,
+            'leaders': top_list,
+            'laggards': bottom_list,
         }, indent=2)
     elif args.format == 'html':
-        output = _format_leaderboard_html(leaderboard, start_str, end_str, args.days)
+        output = _format_leaderboard_html(top_list, bottom_list, start_str, end_str, args.days)
     elif args.format == 'markdown':
-        output = _format_leaderboard_markdown(leaderboard, start_str, end_str, args.days)
+        output = _format_leaderboard_markdown(top_list, bottom_list, start_str, end_str, args.days)
     elif args.format == 'mdhtml':
-        output = _format_leaderboard_mdhtml(leaderboard, start_str, end_str, args.days)
+        output = _format_leaderboard_mdhtml(top_list, bottom_list, start_str, end_str, args.days)
     else:
-        output = _format_leaderboard_text(leaderboard, start_str, end_str, args.days)
+        output = _format_leaderboard_text(top_list, bottom_list, start_str, end_str, args.days)
     
     # Write output
     if args.output:
@@ -1919,186 +1939,245 @@ def _format_memory_short(bytes_val: float) -> str:
         return f"{bytes_val:.0f}"
 
 
-def _format_leaderboard_text(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
+def _format_leaderboard_text(leaders: List[Dict], laggards: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as plain text."""
     lines = []
-    lines.append("")
-    lines.append("=" * 120)
-    lines.append(f"  Efficiency Leaders | {start_str} to {end_str} ({days} days)")
-    lines.append("=" * 120)
-    lines.append("")
-    lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Req':>9} {'CPU Use':>9} {'CPU Eff':>9} {'Mem Req':>10} {'Mem Use':>10} {'Mem Eff':>9} {'Score':>9}")
-    lines.append("-" * 120)
     
-    for rank, entry in enumerate(leaderboard, 1):
-        # Format memory values
-        mem_req = _format_memory_short(entry['mem_req'])
-        mem_use = _format_memory_short(entry['mem_use'])
+    if leaders:
+        lines.append("")
+        lines.append("=" * 120)
+        lines.append(f"  🏆 Efficiency Leaders | {start_str} to {end_str} ({days} days)")
+        lines.append("=" * 120)
+        lines.append("")
+        lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Req':>9} {'CPU Use':>9} {'CPU Eff':>9} {'Mem Req':>10} {'Mem Use':>10} {'Mem Eff':>9} {'Score':>9}")
+        lines.append("-" * 120)
         
-        lines.append(
-            f"{rank:<6} {entry['user']:<15} {entry['jobs']:>6} "
-            f"{entry['cpu_req']:>9} {entry['cpu_use']:>9.1f} {entry['avg_cpu_eff']:>8.2f}% "
-            f"{mem_req:>10} {mem_use:>10} {entry['avg_mem_eff']:>8.2f}% "
-            f"{entry['combined_score']:>8.2f}%"
-        )
+        for rank, entry in enumerate(leaders, 1):
+            mem_req = _format_memory_short(entry['mem_req'])
+            mem_use = _format_memory_short(entry['mem_use'])
+            lines.append(
+                f"{rank:<6} {entry['user']:<15} {entry['jobs']:>6} "
+                f"{entry['cpu_req']:>9} {entry['cpu_use']:>9.1f} {entry['avg_cpu_eff']:>8.2f}% "
+                f"{mem_req:>10} {mem_use:>10} {entry['avg_mem_eff']:>8.2f}% "
+                f"{entry['combined_score']:>8.2f}%"
+            )
+        lines.append("")
     
-    lines.append("")
+    if laggards:
+        lines.append("")
+        lines.append("=" * 120)
+        lines.append(f"  ⚠️  Low Efficiency Users | {start_str} to {end_str} ({days} days)")
+        lines.append("=" * 120)
+        lines.append("")
+        lines.append(f"{'Rank':<6} {'User':<15} {'Jobs':>6} {'CPU Req':>9} {'CPU Use':>9} {'CPU Eff':>9} {'Mem Req':>10} {'Mem Use':>10} {'Mem Eff':>9} {'Score':>9}")
+        lines.append("-" * 120)
+        
+        # Rank from bottom (worst first)
+        for i, entry in enumerate(laggards):
+            mem_req = _format_memory_short(entry['mem_req'])
+            mem_use = _format_memory_short(entry['mem_use'])
+            lines.append(
+                f"{i+1:<6} {entry['user']:<15} {entry['jobs']:>6} "
+                f"{entry['cpu_req']:>9} {entry['cpu_use']:>9.1f} {entry['avg_cpu_eff']:>8.2f}% "
+                f"{mem_req:>10} {mem_use:>10} {entry['avg_mem_eff']:>8.2f}% "
+                f"{entry['combined_score']:>8.2f}%"
+            )
+        lines.append("")
+    
     lines.append("Score = 50% CPU efficiency + 50% memory efficiency")
     lines.append("")
     
     return "\n".join(lines)
 
 
-def _format_leaderboard_markdown(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
+def _format_leaderboard_markdown(leaders: List[Dict], laggards: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as Markdown table."""
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = []
-    lines.append(f"# 🏆 Efficiency Leaders")
-    lines.append("")
-    lines.append(f"**Period:** {start_str} to {end_str} ({days} days)")
-    lines.append(f"**Generated:** {generated_at}")
-    lines.append(f"**Score:** 50% CPU efficiency + 50% memory efficiency")
-    lines.append("")
-    lines.append("| Rank | User | Jobs | CPU Req | CPU Use | CPU Eff | Mem Req | Mem Use | Mem Eff | Score |")
-    lines.append("|------|------|-----:|--------:|--------:|--------:|--------:|--------:|--------:|------:|")
     
-    for rank, entry in enumerate(leaderboard, 1):
-        # Format memory values
-        mem_req = _format_memory_short(entry['mem_req'])
-        mem_use = _format_memory_short(entry['mem_use'])
+    if leaders:
+        lines.append(f"# 🏆 Efficiency Leaders")
+        lines.append("")
+        lines.append(f"**Period:** {start_str} to {end_str} ({days} days)")
+        lines.append(f"**Generated:** {generated_at}")
+        lines.append(f"**Score:** 50% CPU efficiency + 50% memory efficiency")
+        lines.append("")
+        lines.append("| Rank | User | Jobs | CPU Req | CPU Use | CPU Eff | Mem Req | Mem Use | Mem Eff | Score |")
+        lines.append("|------|------|-----:|--------:|--------:|--------:|--------:|--------:|--------:|------:|")
         
-        # Medal emoji for top 3
-        if rank == 1:
-            rank_str = "🥇 1"
-        elif rank == 2:
-            rank_str = "🥈 2"
-        elif rank == 3:
-            rank_str = "🥉 3"
-        else:
-            rank_str = str(rank)
-        
-        lines.append(
-            f"| {rank_str} | {entry['user']} | {entry['jobs']} | "
-            f"{entry['cpu_req']} | {entry['cpu_use']:.1f} | {entry['avg_cpu_eff']:.2f}% | "
-            f"{mem_req} | {mem_use} | {entry['avg_mem_eff']:.2f}% | "
-            f"{entry['combined_score']:.2f}% |"
-        )
+        for rank, entry in enumerate(leaders, 1):
+            mem_req = _format_memory_short(entry['mem_req'])
+            mem_use = _format_memory_short(entry['mem_use'])
+            
+            if rank == 1:
+                rank_str = "🥇 1"
+            elif rank == 2:
+                rank_str = "🥈 2"
+            elif rank == 3:
+                rank_str = "🥉 3"
+            else:
+                rank_str = str(rank)
+            
+            lines.append(
+                f"| {rank_str} | {entry['user']} | {entry['jobs']} | "
+                f"{entry['cpu_req']} | {entry['cpu_use']:.1f} | {entry['avg_cpu_eff']:.2f}% | "
+                f"{mem_req} | {mem_use} | {entry['avg_mem_eff']:.2f}% | "
+                f"{entry['combined_score']:.2f}% |"
+            )
+        lines.append("")
     
-    lines.append("")
+    if laggards:
+        lines.append(f"# ⚠️ Low Efficiency Users")
+        lines.append("")
+        if not leaders:
+            lines.append(f"**Period:** {start_str} to {end_str} ({days} days)")
+            lines.append(f"**Generated:** {generated_at}")
+            lines.append(f"**Score:** 50% CPU efficiency + 50% memory efficiency")
+            lines.append("")
+        lines.append("| Rank | User | Jobs | CPU Req | CPU Use | CPU Eff | Mem Req | Mem Use | Mem Eff | Score |")
+        lines.append("|------|------|-----:|--------:|--------:|--------:|--------:|--------:|--------:|------:|")
+        
+        for rank, entry in enumerate(laggards, 1):
+            mem_req = _format_memory_short(entry['mem_req'])
+            mem_use = _format_memory_short(entry['mem_use'])
+            lines.append(
+                f"| {rank} | {entry['user']} | {entry['jobs']} | "
+                f"{entry['cpu_req']} | {entry['cpu_use']:.1f} | {entry['avg_cpu_eff']:.2f}% | "
+                f"{mem_req} | {mem_use} | {entry['avg_mem_eff']:.2f}% | "
+                f"{entry['combined_score']:.2f}% |"
+            )
+        lines.append("")
     
     return "\n".join(lines)
 
 
-def _format_leaderboard_mdhtml(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
+def _format_leaderboard_mdhtml(leaders: List[Dict], laggards: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as Markdown with embedded interactive HTML."""
     generated_at = datetime.now().strftime("%y-%m-%d %H:%M:%S")
     days_str = "1 day" if days == 1 else f"{days} days"
     
-    md = f"""## 🏆 Efficiency Leaders
-
-<style>
-.lb-controls {{ background: #f8f9fa; padding: 6px 10px; border-radius: 5px; margin-bottom: 8px; font-size: 0.85em; white-space: nowrap; display: inline-block; }}
-.lb-controls label {{ margin-right: 12px; cursor: pointer; }}
-.lb-controls input {{ margin-right: 3px; cursor: pointer; }}
-.lb-table {{ border-collapse: collapse; }}
-.lb-table th {{ background: #005f85; color: white; padding: 8px 12px; text-align: left; cursor: pointer; white-space: nowrap; }}
-.lb-table th:hover {{ background: #004a68; }}
-.lb-table td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; white-space: nowrap; }}
-.lb-table tr:hover {{ background: #f5f5f5; }}
-.lb-hidden {{ display: none; }}
-.lb-good {{ color: #28a745; }}
-.lb-warn {{ color: #ffc107; }}
-.lb-bad {{ color: #dc3545; }}
-.lb-score {{ font-weight: bold; color: #007bff; }}
+    md = ""
+    
+    # CSS styles (only once at the top)
+    md += """<style>
+.lb-controls { background: #f8f9fa; padding: 6px 10px; border-radius: 5px; margin-bottom: 8px; font-size: 0.85em; white-space: nowrap; display: inline-block; }
+.lb-controls label { margin-right: 12px; cursor: pointer; }
+.lb-controls input { margin-right: 3px; cursor: pointer; }
+.lb-table { border-collapse: collapse; }
+.lb-table th { background: #005f85; color: white; padding: 8px 12px; text-align: left; cursor: pointer; white-space: nowrap; }
+.lb-table th:hover { background: #004a68; }
+.lb-table td { padding: 8px 12px; border-bottom: 1px solid #ddd; white-space: nowrap; }
+.lb-table tr:hover { background: #f5f5f5; }
+.lb-table.laggards th { background: #c0392b; }
+.lb-table.laggards th:hover { background: #a93226; }
+.lb-hidden { display: none; }
+.lb-good { color: #28a745; }
+.lb-warn { color: #ffc107; }
+.lb-bad { color: #dc3545; }
+.lb-score { font-weight: bold; color: #007bff; }
 </style>
+
+"""
+    
+    # Leaders section
+    if leaders:
+        md += f"""## 🏆 Efficiency Leaders
 
 <details>
 <summary>Details</summary>
 <p><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
-<p style="font-size: 0.85em; color: #555; margin: 8px 0;">This leaderboard ranks users by how efficiently they use allocated cluster resources. <strong>CPU Eff</strong> = CPU time used / CPU time requested. <strong>Mem Eff</strong> = peak memory used / memory requested. <strong>Score</strong> = average of CPU and Memory efficiency (50/50 weighting). Higher scores indicate better resource utilization. This report runs automatically every night at 11:59 PM and displays jobs from the previous day.</p>
-<div class="lb-controls">
-<strong>Add columns:</strong>
-<label><input type="checkbox" data-col="2" onchange="lbToggleCol(this)">Jobs</label>
-<label><input type="checkbox" data-col="3" onchange="lbToggleCol(this)">CPU Req</label>
-<label><input type="checkbox" data-col="4" onchange="lbToggleCol(this)">CPU Use</label>
-<label><input type="checkbox" data-col="6" onchange="lbToggleCol(this)">Mem Req</label>
-<label><input type="checkbox" data-col="7" onchange="lbToggleCol(this)">Mem Use</label>
-</div>
+<p style="font-size: 0.85em; color: #555; margin: 8px 0;">This leaderboard ranks users by how efficiently they use allocated cluster resources. <strong>CPU Eff</strong> = CPU time used / CPU time requested. <strong>Mem Eff</strong> = peak memory used / memory requested. <strong>Score</strong> = average of CPU and Memory efficiency (50/50 weighting). Higher scores indicate better resource utilization.</p>
 </details>
 
-<table class="lb-table" id="lb-table">
+<table class="lb-table" id="lb-table-leaders">
 <thead>
 <tr>
 <th>Rank</th>
 <th>User</th>
-<th class="lb-hidden">Jobs</th>
-<th class="lb-hidden">CPU Req</th>
-<th class="lb-hidden">CPU Use</th>
 <th>CPU Eff</th>
-<th class="lb-hidden">Mem Req</th>
-<th class="lb-hidden">Mem Use</th>
 <th>Mem Eff</th>
 <th>Score</th>
 </tr>
 </thead>
 <tbody>
 """
-    
-    for rank, entry in enumerate(leaderboard, 1):
-        mem_req = _format_memory_short(entry['mem_req'])
-        mem_use = _format_memory_short(entry['mem_use'])
         
-        # Medal emoji for top 3
-        if rank == 1:
-            rank_str = "🥇 1"
-        elif rank == 2:
-            rank_str = "🥈 2"
-        elif rank == 3:
-            rank_str = "🥉 3"
-        else:
-            rank_str = str(rank)
-        
-        # Efficiency color classes
-        cpu_class = 'lb-good' if entry['avg_cpu_eff'] >= 70 else 'lb-warn' if entry['avg_cpu_eff'] >= 40 else 'lb-bad'
-        mem_class = 'lb-good' if entry['avg_mem_eff'] >= 60 else 'lb-warn' if entry['avg_mem_eff'] >= 30 else 'lb-bad'
-        
-        md += f"""<tr>
+        for rank, entry in enumerate(leaders, 1):
+            # Medal emoji for top 3
+            if rank == 1:
+                rank_str = "🥇 1"
+            elif rank == 2:
+                rank_str = "🥈 2"
+            elif rank == 3:
+                rank_str = "🥉 3"
+            else:
+                rank_str = str(rank)
+            
+            cpu_class = 'lb-good' if entry['avg_cpu_eff'] >= 70 else 'lb-warn' if entry['avg_cpu_eff'] >= 40 else 'lb-bad'
+            mem_class = 'lb-good' if entry['avg_mem_eff'] >= 60 else 'lb-warn' if entry['avg_mem_eff'] >= 30 else 'lb-bad'
+            
+            md += f"""<tr>
 <td>{rank_str}</td>
 <td>{entry['user']}</td>
-<td class="lb-hidden">{entry['jobs']}</td>
-<td class="lb-hidden">{entry['cpu_req']}</td>
-<td class="lb-hidden">{entry['cpu_use']:.1f}</td>
 <td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
-<td class="lb-hidden">{mem_req}</td>
-<td class="lb-hidden">{mem_use}</td>
 <td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
 <td class="lb-score">{entry['combined_score']:.2f}%</td>
 </tr>
 """
-    
-    md += """</tbody>
+        
+        md += """</tbody>
 </table>
 
-<script>
-function lbToggleCol(cb) {
-    const col = parseInt(cb.dataset.col);
-    const table = document.getElementById('lb-table');
-    const cells = table.querySelectorAll('th:nth-child(' + (col + 1) + '), td:nth-child(' + (col + 1) + ')');
-    cells.forEach(cell => {
-        if (cb.checked) {
-            cell.classList.remove('lb-hidden');
-        } else {
-            cell.classList.add('lb-hidden');
-        }
-    });
-}
-</script>
+"""
+    
+    # Laggards section
+    if laggards:
+        md += f"""## ⚠️ Low Efficiency Users
+
+"""
+        if not leaders:
+            md += f"""<details>
+<summary>Details</summary>
+<p><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
+<p style="font-size: 0.85em; color: #555; margin: 8px 0;">Users with low resource efficiency. Consider reaching out to offer optimization assistance.</p>
+</details>
+
+"""
+        
+        md += """<table class="lb-table laggards" id="lb-table-laggards">
+<thead>
+<tr>
+<th>Rank</th>
+<th>User</th>
+<th>CPU Eff</th>
+<th>Mem Eff</th>
+<th>Score</th>
+</tr>
+</thead>
+<tbody>
+"""
+        
+        for rank, entry in enumerate(laggards, 1):
+            cpu_class = 'lb-good' if entry['avg_cpu_eff'] >= 70 else 'lb-warn' if entry['avg_cpu_eff'] >= 40 else 'lb-bad'
+            mem_class = 'lb-good' if entry['avg_mem_eff'] >= 60 else 'lb-warn' if entry['avg_mem_eff'] >= 30 else 'lb-bad'
+            
+            md += f"""<tr>
+<td>{rank}</td>
+<td>{entry['user']}</td>
+<td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
+<td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
+<td class="lb-score">{entry['combined_score']:.2f}%</td>
+</tr>
+"""
+        
+        md += """</tbody>
+</table>
 """
     
     return md
 
 
-def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: str, days: int) -> str:
+def _format_leaderboard_html(leaders: List[Dict], laggards: List[Dict], start_str: str, end_str: str, days: int) -> str:
     """Format leaderboard as HTML with sortable columns."""
     generated_at = datetime.now().strftime("%y-%m-%d %H:%M:%S")
     days_str = "1 day" if days == 1 else f"{days} days"
@@ -2106,19 +2185,17 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Efficiency Leaders</title>
+    <title>Efficiency Leaderboard</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #f5f5f5; }}
-        h2 {{ color: #333; border-bottom: 2px solid #005f85; padding-bottom: 10px; white-space: nowrap; margin-bottom: 8px; display: inline-block; }}
+        h3 {{ color: #333; border-bottom: 2px solid #005f85; padding-bottom: 10px; white-space: nowrap; margin-bottom: 8px; display: inline-block; }}
+        h3.laggards {{ border-bottom-color: #c0392b; }}
         .subtitle {{ color: #666; margin-bottom: 10px; font-size: 0.9em; white-space: nowrap; }}
-        .controls {{ background: white; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-size: 0.85em; white-space: nowrap; display: inline-block; }}
-        .controls-label {{ font-weight: 600; color: #333; margin-right: 10px; }}
-        .column-toggle {{ display: inline-flex; align-items: center; margin-right: 12px; cursor: pointer; }}
-        .column-toggle input {{ margin-right: 3px; cursor: pointer; }}
-        .column-toggle label {{ cursor: pointer; }}
-        table {{ border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }}
+        table {{ border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; margin-bottom: 20px; }}
         th {{ background: #005f85; color: white; padding: 10px 12px; text-align: left; font-weight: 600; cursor: pointer; user-select: none; position: relative; white-space: nowrap; }}
         th:hover {{ background: #004a68; }}
+        table.laggards th {{ background: #c0392b; }}
+        table.laggards th:hover {{ background: #a93226; }}
         th.sort-asc::after {{ content: ' \25B2'; font-size: 0.8em; }}
         th.sort-desc::after {{ content: ' \25BC'; font-size: 0.8em; }}
         td {{ padding: 8px 12px; border-bottom: 1px solid #eee; white-space: nowrap; }}
@@ -2135,158 +2212,173 @@ def _format_leaderboard_html(leaderboard: List[Dict], start_str: str, end_str: s
         .efficiency-danger {{ color: #dc3545; }}
         .footer {{ margin-top: 20px; color: #666; font-size: 0.9em; }}
         .sort-hint {{ font-size: 0.85em; color: #888; margin-bottom: 10px; }}
-        .col-hidden {{ display: none; }}
         details {{ margin-bottom: 10px; }}
         summary {{ cursor: pointer; font-size: 0.85em; color: #666; padding: 4px 0; }}
         summary:hover {{ color: #333; }}
         .details-content {{ padding-top: 8px; }}
-        h3 {{ white-space: nowrap; }}
     </style>
 </head>
 <body>
-    <h3>\\U0001F3C6 Efficiency Leaders</h3>
+"""
+    
+    # Leaders section
+    if leaders:
+        html += f"""    <h3>\\U0001F3C6 Efficiency Leaders</h3>
     
     <details>
         <summary>Details</summary>
         <div class="details-content">
             <p style="margin: 0 0 8px 0; font-size: 0.85em;"><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
-            <p style="font-size: 0.85em; color: #555; margin: 0 0 10px 0; max-width: 600px;">This leaderboard ranks users by how efficiently they use allocated cluster resources. <strong>CPU Eff</strong> = CPU time used / CPU time requested. <strong>Mem Eff</strong> = peak memory used / memory requested. <strong>Score</strong> = average of CPU and Memory efficiency (50/50 weighting). Higher scores indicate better resource utilization. This report runs automatically every night at 11:59 PM and displays jobs from the previous day.</p>
-            <div class="controls">
-                <span class="controls-label">Add columns:</span>
-                <span class="column-toggle"><input type="checkbox" id="col-jobs" data-col="2"><label for="col-jobs">Jobs</label></span>
-                <span class="column-toggle"><input type="checkbox" id="col-cpureq" data-col="3"><label for="col-cpureq">CPU Req</label></span>
-                <span class="column-toggle"><input type="checkbox" id="col-cpuuse" data-col="4"><label for="col-cpuuse">CPU Use</label></span>
-                <span class="column-toggle"><input type="checkbox" id="col-memreq" data-col="6"><label for="col-memreq">Mem Req</label></span>
-                <span class="column-toggle"><input type="checkbox" id="col-memuse" data-col="7"><label for="col-memuse">Mem Use</label></span>
-            </div>
+            <p style="font-size: 0.85em; color: #555; margin: 0 0 10px 0; max-width: 600px;">This leaderboard ranks users by how efficiently they use allocated cluster resources. <strong>CPU Eff</strong> = CPU time used / CPU time requested. <strong>Mem Eff</strong> = peak memory used / memory requested. <strong>Score</strong> = average of CPU and Memory efficiency (50/50 weighting). Higher scores indicate better resource utilization.</p>
             <p class="sort-hint">Click column headers to sort</p>
         </div>
     </details>
     
-    <table id="leaderboard">
+    <table id="leaderboard-leaders" class="sortable-table">
         <thead>
             <tr>
                 <th data-sort="rank" data-type="number">Rank</th>
                 <th data-sort="user" data-type="string">User</th>
-                <th data-sort="jobs" data-type="number" class="col-hidden">Jobs</th>
-                <th data-sort="cpureq" data-type="number" class="col-hidden">CPU Req</th>
-                <th data-sort="cpuuse" data-type="number" class="col-hidden">CPU Use</th>
                 <th data-sort="cpu" data-type="number">CPU Eff</th>
-                <th data-sort="memreq" data-type="number" class="col-hidden">Mem Req</th>
-                <th data-sort="memuse" data-type="number" class="col-hidden">Mem Use</th>
                 <th data-sort="mem" data-type="number">Mem Eff</th>
                 <th data-sort="score" data-type="number">Score</th>
             </tr>
         </thead>
         <tbody>
 """
-    
-    for rank, entry in enumerate(leaderboard, 1):
-        # Medal and rank styling
-        if rank == 1:
-            medal = '<span class="medal">\U0001F947</span>'
-            rank_class = 'rank-1'
-        elif rank == 2:
-            medal = '<span class="medal">\U0001F948</span>'
-            rank_class = 'rank-2'
-        elif rank == 3:
-            medal = '<span class="medal">\U0001F949</span>'
-            rank_class = 'rank-3'
-        else:
-            medal = '<span class="medal" style="visibility:hidden;">\U0001F947</span>'
-            rank_class = ''
         
-        # Efficiency color coding
-        cpu_class = 'efficiency-good' if entry['avg_cpu_eff'] >= 70 else 'efficiency-warning' if entry['avg_cpu_eff'] >= 40 else 'efficiency-danger'
-        mem_class = 'efficiency-good' if entry['avg_mem_eff'] >= 60 else 'efficiency-warning' if entry['avg_mem_eff'] >= 30 else 'efficiency-danger'
-        
-        # Format memory values
-        mem_req = _format_memory_short(entry['mem_req'])
-        mem_use = _format_memory_short(entry['mem_use'])
-        
-        html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-jobs="{entry['jobs']}" data-cpureq="{entry['cpu_req']}" data-cpuuse="{entry['cpu_use']:.2f}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-memreq="{entry['mem_req']}" data-memuse="{entry['mem_use']}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}">
+        for rank, entry in enumerate(leaders, 1):
+            # Medal and rank styling
+            if rank == 1:
+                medal = '<span class="medal">\U0001F947</span>'
+                rank_class = 'rank-1'
+            elif rank == 2:
+                medal = '<span class="medal">\U0001F948</span>'
+                rank_class = 'rank-2'
+            elif rank == 3:
+                medal = '<span class="medal">\U0001F949</span>'
+                rank_class = 'rank-3'
+            else:
+                medal = '<span class="medal" style="visibility:hidden;">\U0001F947</span>'
+                rank_class = ''
+            
+            # Efficiency color coding
+            cpu_class = 'efficiency-good' if entry['avg_cpu_eff'] >= 70 else 'efficiency-warning' if entry['avg_cpu_eff'] >= 40 else 'efficiency-danger'
+            mem_class = 'efficiency-good' if entry['avg_mem_eff'] >= 60 else 'efficiency-warning' if entry['avg_mem_eff'] >= 30 else 'efficiency-danger'
+            
+            html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}">
                 <td class="rank {rank_class}">{medal}{rank}</td>
                 <td>{entry['user']}</td>
-                <td class="col-hidden">{entry['jobs']}</td>
-                <td class="col-hidden">{entry['cpu_req']}</td>
-                <td class="col-hidden">{entry['cpu_use']:.1f}</td>
                 <td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
-                <td class="col-hidden">{mem_req}</td>
-                <td class="col-hidden">{mem_use}</td>
                 <td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
                 <td class="score">{entry['combined_score']:.2f}%</td>
             </tr>
 """
-    
-    html += """        </tbody>
+        
+        html += """        </tbody>
     </table>
 
+"""
+    
+    # Laggards section
+    if laggards:
+        html += f"""    <h3 class="laggards">\\u26A0\\uFE0F Low Efficiency Users</h3>
+"""
+        if not leaders:
+            html += f"""    
+    <details>
+        <summary>Details</summary>
+        <div class="details-content">
+            <p style="margin: 0 0 8px 0; font-size: 0.85em;"><strong>Period:</strong> {days_str} | <strong>Generated:</strong> {generated_at}</p>
+            <p style="font-size: 0.85em; color: #555; margin: 0 0 10px 0; max-width: 600px;">Users with low resource efficiency. Consider reaching out to offer optimization assistance.</p>
+            <p class="sort-hint">Click column headers to sort</p>
+        </div>
+    </details>
+"""
+        
+        html += """    
+    <table id="leaderboard-laggards" class="sortable-table laggards">
+        <thead>
+            <tr>
+                <th data-sort="rank" data-type="number">Rank</th>
+                <th data-sort="user" data-type="string">User</th>
+                <th data-sort="cpu" data-type="number">CPU Eff</th>
+                <th data-sort="mem" data-type="number">Mem Eff</th>
+                <th data-sort="score" data-type="number">Score</th>
+            </tr>
+        </thead>
+        <tbody>
+"""
+        
+        for rank, entry in enumerate(laggards, 1):
+            # Efficiency color coding
+            cpu_class = 'efficiency-good' if entry['avg_cpu_eff'] >= 70 else 'efficiency-warning' if entry['avg_cpu_eff'] >= 40 else 'efficiency-danger'
+            mem_class = 'efficiency-good' if entry['avg_mem_eff'] >= 60 else 'efficiency-warning' if entry['avg_mem_eff'] >= 30 else 'efficiency-danger'
+            
+            html += f"""            <tr data-rank="{rank}" data-user="{entry['user']}" data-cpu="{entry['avg_cpu_eff']:.4f}" data-mem="{entry['avg_mem_eff']:.4f}" data-score="{entry['combined_score']:.4f}">
+                <td class="rank">{rank}</td>
+                <td>{entry['user']}</td>
+                <td class="{cpu_class}">{entry['avg_cpu_eff']:.2f}%</td>
+                <td class="{mem_class}">{entry['avg_mem_eff']:.2f}%</td>
+                <td class="score">{entry['combined_score']:.2f}%</td>
+            </tr>
+"""
+        
+        html += """        </tbody>
+    </table>
+"""
+    
+    html += """
 <script>
-// Column visibility toggle
+// Sortable table functionality
 document.addEventListener('DOMContentLoaded', function() {
-    const toggles = document.querySelectorAll('.column-toggle input[data-col]');
+    const tables = document.querySelectorAll('.sortable-table');
     
-    toggles.forEach(toggle => {
-        toggle.addEventListener('change', function() {
-            const colIndex = parseInt(this.dataset.col);
-            const table = document.getElementById('leaderboard');
-            const cells = table.querySelectorAll(`th:nth-child(${colIndex + 1}), td:nth-child(${colIndex + 1})`);
-            
-            cells.forEach(cell => {
-                if (this.checked) {
-                    cell.classList.remove('col-hidden');
-                } else {
-                    cell.classList.add('col-hidden');
-                }
-            });
-        });
-    });
-
-    // Sortable table functionality
-    const table = document.getElementById('leaderboard');
-    const headers = table.querySelectorAll('th');
-    let currentSort = { column: null, direction: 'asc' };
-    
-    headers.forEach(header => {
-        header.addEventListener('click', function() {
-            const sortKey = this.dataset.sort;
-            const sortType = this.dataset.type;
-            
-            // Toggle direction if same column
-            if (currentSort.column === sortKey) {
-                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
-            } else {
-                currentSort.column = sortKey;
-                currentSort.direction = 'asc';
-            }
-            
-            // Update header styling
-            headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
-            this.classList.add(currentSort.direction === 'asc' ? 'sort-asc' : 'sort-desc');
-            
-            // Sort rows
-            const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            
-            rows.sort((a, b) => {
-                let aVal = a.dataset[sortKey];
-                let bVal = b.dataset[sortKey];
+    tables.forEach(table => {
+        const headers = table.querySelectorAll('th');
+        let currentSort = { column: null, direction: 'asc' };
+        
+        headers.forEach(header => {
+            header.addEventListener('click', function() {
+                const sortKey = this.dataset.sort;
+                const sortType = this.dataset.type;
                 
-                if (sortType === 'number') {
-                    aVal = parseFloat(aVal);
-                    bVal = parseFloat(bVal);
+                // Toggle direction if same column
+                if (currentSort.column === sortKey) {
+                    currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
                 } else {
-                    aVal = aVal.toLowerCase();
-                    bVal = bVal.toLowerCase();
+                    currentSort.column = sortKey;
+                    currentSort.direction = 'asc';
                 }
                 
-                if (aVal < bVal) return currentSort.direction === 'asc' ? -1 : 1;
-                if (aVal > bVal) return currentSort.direction === 'asc' ? 1 : -1;
-                return 0;
+                // Update header styling
+                headers.forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+                this.classList.add(currentSort.direction === 'asc' ? 'sort-asc' : 'sort-desc');
+                
+                // Sort rows
+                const tbody = table.querySelector('tbody');
+                const rows = Array.from(tbody.querySelectorAll('tr'));
+                
+                rows.sort((a, b) => {
+                    let aVal = a.dataset[sortKey];
+                    let bVal = b.dataset[sortKey];
+                    
+                    if (sortType === 'number') {
+                        aVal = parseFloat(aVal);
+                        bVal = parseFloat(bVal);
+                    } else {
+                        aVal = aVal.toLowerCase();
+                        bVal = bVal.toLowerCase();
+                    }
+                    
+                    if (aVal < bVal) return currentSort.direction === 'asc' ? -1 : 1;
+                    if (aVal > bVal) return currentSort.direction === 'asc' ? 1 : -1;
+                    return 0;
+                });
+                
+                // Re-append sorted rows
+                rows.forEach(row => tbody.appendChild(row));
             });
-            
-            // Re-append sorted rows
-            rows.forEach(row => tbody.appendChild(row));
         });
     });
 });
@@ -3638,7 +3730,10 @@ Examples:
     lb_parser.add_argument('--partition', '-p', help='Filter by partition')
     lb_parser.add_argument('--sort', '-s', choices=['efficiency', 'cpu', 'memory', 'jobs'],
                            default='efficiency', help='Sort by (default: efficiency)')
-    lb_parser.add_argument('--top', '-t', type=int, help='Show only top N users')
+    lb_parser.add_argument('--top', '-t', type=int, help='Show only top N users (best efficiency)')
+    lb_parser.add_argument('--bottom', '-b', type=int, help='Show only bottom N users (worst efficiency)')
+    lb_parser.add_argument('--show-both', '-B', metavar='N', type=int,
+                           help='Show both top N and bottom N users')
     lb_parser.add_argument('--min-jobs', '-m', type=int, default=0,
                            help='Minimum jobs to be included (default: 0)')
     lb_parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
