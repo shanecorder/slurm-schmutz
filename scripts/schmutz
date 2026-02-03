@@ -2808,11 +2808,14 @@ def _get_queue_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
             mem_bytes *= cpus
         
         # Parse GPUs from GRES (handle multiple GPU types)
-        gpus = 0
+        # Note: GPU count in GRES is per-node, so multiply by number of nodes
+        gpus_per_node = 0
         if gres_str and gres_str != '(null)':
             # Use finditer to catch ALL gpu specifications
             for gpu_match in re.finditer(r'gpu(?::[^:,()]+)?:(\d+)', gres_str.lower()):
-                gpus += int(gpu_match.group(1))
+                gpus_per_node += int(gpu_match.group(1))
+        
+        gpus = gpus_per_node * nodes
         
         job_entry = {
             'job_id': job_id,
