@@ -2749,6 +2749,21 @@ def _get_queue_info(config: Config, job_stats: JobStats) -> Dict[str, Any]:
         'partitions': {},
     }
     
+    # First, get all partitions from sinfo so we show partitions even with 0 jobs
+    part_cmd = [
+        config.slurm.sinfo_path,
+        '--noheader',
+        '-o', '%P'
+    ]
+    stdout, stderr, rc = job_stats._run_command(part_cmd)
+    if rc == 0 and stdout.strip():
+        for line in stdout.strip().split('\n'):
+            part_name = line.strip().rstrip('*')  # Remove default partition marker
+            if part_name and part_name not in queue_info['partitions']:
+                queue_info['partitions'][part_name] = {
+                    'running': 0, 'pending': 0, 'cpus': 0, 'memory': 0, 'gpus': 0
+                }
+    
     # Run squeue to get all jobs
     # Format: JOBID|USER|STATE|PARTITION|CPUS|MIN_MEMORY|GRES|NODES
     cmd = [
