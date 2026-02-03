@@ -3078,7 +3078,7 @@ def _format_sitrep_mdhtml(data: Dict[str, Any]) -> str:
         else:
             return 'sr-warn'
     
-    md = f"""## \U0001F4CA Cluster Sitrep
+    md = f"""## \U0001F4CA Current Status
 
 <style>
 .sr-table {{ border-collapse: collapse; margin: 8px 0; }}
@@ -3102,15 +3102,12 @@ details > summary .sr-bad {{ color: #FF6B6B; }}
 details > summary .sr-blue {{ color: #87CEEB; }}
 </style>
 
-<details open>
-<summary>\U0001F4BB <strong>Resources</strong> — <span class="{pct_class(res_pct['cpus'])}">{res_pct['cpus']:.0f}%</span> CPU, <span class="{pct_class(res_pct['memory'])}">{res_pct['memory']:.0f}%</span> mem, <span class="{pct_class(res_pct['gpus'])}">{res_pct['gpus']:.0f}%</span> GPU</summary>
 <table class="sr-table">
 <tr><th>Resource</th><th>In Use</th><th>Total</th><th>%</th></tr>
 <tr><td>CPUs</td><td class="sr-val">{res['cpus']}</td><td>{res_total['cpus']}</td><td class="{pct_class(res_pct['cpus'])}">{res_pct['cpus']:.1f}%</td></tr>
 <tr><td>Memory</td><td class="sr-val">{res['memory_human']}</td><td>{res_total['memory_human']}</td><td class="{pct_class(res_pct['memory'])}">{res_pct['memory']:.1f}%</td></tr>
 <tr><td>GPUs</td><td class="sr-val">{res['gpus']}</td><td>{res_total['gpus']}</td><td class="{pct_class(res_pct['gpus'])}">{res_pct['gpus']:.1f}%</td></tr>
 </table>
-</details>
 
 <details>
 <summary>\U0001F5A5 <strong>Nodes</strong> — {nodes['total']} total (<span class="sr-good">{nodes['idle']}</span> idle, <span class="sr-bad">{nodes['down']}</span> down)</summary>
