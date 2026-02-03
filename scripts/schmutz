@@ -2639,13 +2639,13 @@ def _get_node_details(config: Config, job_stats: JobStats) -> List[Dict[str, Any
     nodes = []
     
     # Run sinfo to get per-node resources with allocation info
-    # Format: NODELIST|CPUS|CPUS_ALLOC|MEMORY|FREE_MEM|GRES|GRES_USED|STATE
-    # %O is the correct format for GRES_USED (not %b which is active features)
+    # Use -O (--Format) for long format which supports GresUsed field
+    # Fields: NodeList, CPUs, CPUsState, Memory, FreeMem, Gres, GresUsed, StateCompact
     cmd = [
         config.slurm.sinfo_path,
         '--noheader',
         '-N',  # Node-centric view
-        '-o', '%N|%c|%C|%m|%e|%G|%O|%T'
+        '-O', 'NodeList:|,CPUs:|,CPUsState:|,Memory:|,FreeMem:|,Gres:|,GresUsed:|,StateCompact:'
     ]
     
     stdout, stderr, rc = job_stats._run_command(cmd)
@@ -2658,7 +2658,7 @@ def _get_node_details(config: Config, job_stats: JobStats) -> List[Dict[str, Any
     for line in stdout.strip().split('\n'):
         if not line.strip():
             continue
-        parts = line.split('|')
+        parts = [p.strip() for p in line.split('|')]
         if len(parts) < 8:
             continue
         
@@ -2709,7 +2709,7 @@ def _get_node_details(config: Config, job_stats: JobStats) -> List[Dict[str, Any
             for gpu_match in re.finditer(r'gpu(?::[^:,()]+)?:(\d+)', gres_str.lower()):
                 total_gpus += int(gpu_match.group(1))
         
-        # Parse used GPUs from GRES_USED
+        # Parse used GPUs from GresUsed
         used_gpus = 0
         gres_used_str = parts[6]
         if gres_used_str and gres_used_str != '(null)':
