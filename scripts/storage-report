@@ -1,0 +1,916 @@
+#!/usr/bin/env python3
+"""
+Storage Quota Report Tool
+
+A standalone CLI utility for displaying storage quota usage from Isilon quota reports.
+
+Usage:
+    storage-report <file>                     Show admin summary view
+    storage-report <file> --user USERNAME     Show per-user quotas
+    storage-report <file> --highlights        Show high usage/low efficiency
+    storage-report <file> --format json       Output as JSON
+    storage-report <file> --format html       Output as HTML
+    storage-report <file> --format markdown   Output as Markdown
+    storage-report <file> --format mdhtml     Output as Markdown with HTML
+"""
+
+import sys
+
+# Version check - must be before other imports that require 3.7+
+if sys.version_info < (3, 7):
+    sys.exit(
+        f"Error: storage-report requires Python 3.7 or later.\n"
+        f"You are running Python {sys.version_info.major}.{sys.version_info.minor}."
+    )
+
+__version__ = "1.0.0"
+
+import argparse
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+
+@dataclass
+class QuotaEntry:
+    """Represents a single quota entry."""
+    type: str = ""
+    applies_to: str = ""
+    path: str = ""
+    snap: str = ""
+    hard: str = ""
+    soft: str = ""
+    adv: str = ""
+    used: str = ""
+    reduction: str = ""
+    efficiency: str = ""
+
+    # Parsed numeric values (in bytes)
+    hard_bytes: int = 0
+    soft_bytes: int = 0
+    adv_bytes: int = 0
+    used_bytes: int = 0
+
+    efficiency_pct: float = 0.0
+    usage_pct: float = 0.0
+
+    @staticmethod
+    def parse_size(size_str: str) -> int:
+        """Parse a size string like '230.7 TB' to bytes."""
+        if not size_str or size_str == '-' or size_str == 'N/A':
+            return 0
+
+        # Remove commas and strip whitespace
+        size_str = size_str.replace(',', '').strip()
+
+        # Match number and unit
+        match = re.match(r'([\d.]+)\s*([KMGTPE]?B?)', size_str, re.IGNORECASE)
+        if not match:
+            return 0
+
+        value = float(match.group(1))
+        unit = match.group(2).upper()
+
+        # Convert to bytes
+        multipliers = {
+            'B': 1,
+            'KB': 1024,
+            'K': 1024,
+            'MB': 1024 ** 2,
+            'M': 1024 ** 2,
+            'GB': 1024 ** 3,
+            'G': 1024 ** 3,
+            'TB': 1024 ** 4,
+            'T': 1024 ** 4,
+            'PB': 1024 ** 5,
+            'P': 1024 ** 5,
+            'EB': 1024 ** 6,
+            'E': 1024 ** 6,
+        }
+
+        return int(value * multipliers.get(unit, 1))
+
+    @staticmethod
+    def format_size(bytes_val: int, precision: int = 1) -> str:
+        """Format bytes as human-readable string."""
+        if bytes_val == 0:
+            return "0 B"
+
+        units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB']
+        unit_index = 0
+        value = float(bytes_val)
+
+        while value >= 1024 and unit_index < len(units) - 1:
+            value /= 1024
+            unit_index += 1
+
+        return f"{value:.{precision}f} {units[unit_index]}"
+
+    def calculate_metrics(self):
+        """Calculate usage percentage and efficiency from parsed values."""
+        # Parse sizes
+        self.hard_bytes = self.parse_size(self.hard)
+        self.soft_bytes = self.parse_size(self.soft)
+        self.adv_bytes = self.parse_size(self.adv)
+        self.used_bytes = self.parse_size(self.used)
+
+        # Calculate usage percentage (against hard limit)
+        if self.hard_bytes > 0:
+            self.usage_pct = (self.used_bytes / self.hard_bytes) * 100
+        else:
+            self.usage_pct = 0.0
+
+        # Parse efficiency percentage
+        if self.efficiency and self.efficiency != '-':
+            eff_str = self.efficiency.rstrip('%')
+            try:
+                self.efficiency_pct = float(eff_str)
+            except ValueError:
+                self.efficiency_pct = 0.0
+
+
+@dataclass
+class QuotaStats:
+    """Aggregate statistics for quotas."""
+    total_entries: int = 0
+    total_hard: int = 0
+    total_soft: int = 0
+    total_used: int = 0
+    avg_usage_pct: float = 0.0
+    avg_efficiency: float = 0.0
+    over_soft: int = 0
+    over_hard: int = 0
+    high_usage: int = 0  # >80%
+    low_efficiency: int = 0  # <50%
+    by_user: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    by_path: Dict[str, int] = field(default_factory=dict)
+
+
+class QuotaParser:
+    """Parse and process quota data files."""
+
+    def __init__(self, file_path: str):
+        self.file_path = Path(file_path)
+        self.entries: List[QuotaEntry] = []
+        self.header: List[str] = []
+
+    def parse(self) -> List[QuotaEntry]:
+        """Parse the quota file."""
+        if not self.file_path.exists():
+            raise FileNotFoundError(f"Quota file not found: {self.file_path}")
+
+        with open(self.file_path, 'r') as f:
+            lines = f.readlines()
+
+        if not lines:
+            return []
+
+        # First line is the header
+        header_line = lines[0].strip()
+        self.header = re.split(r'\s{2,}', header_line)
+
+        # Parse data lines
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Split by 2+ spaces (the file is column-aligned)
+            parts = re.split(r'\s{2,}', line)
+
+            if len(parts) < len(self.header):
+                # Pad missing columns
+                parts.extend(['-'] * (len(self.header) - len(parts)))
+
+            entry = QuotaEntry(
+                type=parts[0] if len(parts) > 0 else '-',
+                applies_to=parts[1] if len(parts) > 1 else '-',
+                path=parts[2] if len(parts) > 2 else '-',
+                snap=parts[3] if len(parts) > 3 else '-',
+                hard=parts[4] if len(parts) > 4 else '-',
+                soft=parts[5] if len(parts) > 5 else '-',
+                adv=parts[6] if len(parts) > 6 else '-',
+                used=parts[7] if len(parts) > 7 else '-',
+                reduction=parts[8] if len(parts) > 8 else '-',
+                efficiency=parts[9] if len(parts) > 9 else '-',
+            )
+
+            entry.calculate_metrics()
+            self.entries.append(entry)
+
+        return self.entries
+
+    def calculate_stats(self, entries: Optional[List[QuotaEntry]] = None) -> QuotaStats:
+        """Calculate aggregate statistics."""
+        if entries is None:
+            entries = self.entries
+
+        stats = QuotaStats()
+        stats.total_entries = len(entries)
+
+        usage_pcts = []
+        efficiencies = []
+
+        for entry in entries:
+            stats.total_hard += entry.hard_bytes
+            stats.total_soft += entry.soft_bytes
+            stats.total_used += entry.used_bytes
+
+            # Track usage percentages
+            if entry.usage_pct > 0:
+                usage_pcts.append(entry.usage_pct)
+
+            # Track efficiency
+            if entry.efficiency_pct > 0:
+                efficiencies.append(entry.efficiency_pct)
+
+            # Count problematic quotas
+            if entry.usage_pct >= 100:
+                stats.over_hard += 1
+            elif entry.soft_bytes > 0 and entry.used_bytes >= entry.soft_bytes:
+                stats.over_soft += 1
+
+            if entry.usage_pct >= 80:
+                stats.high_usage += 1
+
+            if entry.efficiency_pct > 0 and entry.efficiency_pct < 50:
+                stats.low_efficiency += 1
+
+            # Track by user
+            user = entry.applies_to
+            if user != '-':
+                if user not in stats.by_user:
+                    stats.by_user[user] = {
+                        'count': 0,
+                        'total_used': 0,
+                        'total_hard': 0,
+                        'entries': []
+                    }
+                stats.by_user[user]['count'] += 1
+                stats.by_user[user]['total_used'] += entry.used_bytes
+                stats.by_user[user]['total_hard'] += entry.hard_bytes
+                stats.by_user[user]['entries'].append(entry)
+
+            # Track by path
+            path = entry.path
+            if path not in stats.by_path:
+                stats.by_path[path] = 0
+            stats.by_path[path] += entry.used_bytes
+
+        # Calculate averages
+        if usage_pcts:
+            stats.avg_usage_pct = sum(usage_pcts) / len(usage_pcts)
+        if efficiencies:
+            stats.avg_efficiency = sum(efficiencies) / len(efficiencies)
+
+        return stats
+
+    def filter_by_user(self, username: str) -> List[QuotaEntry]:
+        """Filter entries by username."""
+        return [e for e in self.entries if e.applies_to == username]
+
+    def get_highlights(self, threshold_usage: float = 80.0, threshold_efficiency: float = 50.0) -> List[QuotaEntry]:
+        """Get entries that are over threshold or have low efficiency."""
+        highlights = []
+
+        for entry in self.entries:
+            is_highlighted = False
+
+            # High usage
+            if entry.usage_pct >= threshold_usage:
+                is_highlighted = True
+
+            # Low efficiency
+            if entry.efficiency_pct > 0 and entry.efficiency_pct < threshold_efficiency:
+                is_highlighted = True
+
+            # Over soft limit
+            if entry.soft_bytes > 0 and entry.used_bytes >= entry.soft_bytes:
+                is_highlighted = True
+
+            if is_highlighted:
+                highlights.append(entry)
+
+        return highlights
+
+
+# =============================================================================
+# Output Formatters
+# =============================================================================
+
+def format_text(entries: List[QuotaEntry], stats: QuotaStats, title: str) -> str:
+    """Format as plain text."""
+    lines = []
+
+    lines.append("")
+    lines.append("=" * 100)
+    lines.append(f"  {title}")
+    lines.append("=" * 100)
+    lines.append("")
+
+    # Summary
+    lines.append("SUMMARY")
+    lines.append("-" * 100)
+    lines.append(f"Total Entries:        {stats.total_entries}")
+    lines.append(f"Total Hard Limit:     {QuotaEntry.format_size(stats.total_hard)}")
+    lines.append(f"Total Used:           {QuotaEntry.format_size(stats.total_used)}")
+    lines.append(f"Overall Usage:        {(stats.total_used/stats.total_hard*100) if stats.total_hard > 0 else 0:.1f}%")
+    lines.append(f"Avg Usage per Quota:  {stats.avg_usage_pct:.1f}%")
+    if stats.avg_efficiency > 0:
+        lines.append(f"Avg Efficiency:       {stats.avg_efficiency:.1f}%")
+    lines.append("")
+    lines.append(f"Over Hard Limit:      {stats.over_hard}")
+    lines.append(f"Over Soft Limit:      {stats.over_soft}")
+    lines.append(f"High Usage (>80%):    {stats.high_usage}")
+    if stats.low_efficiency > 0:
+        lines.append(f"Low Efficiency (<50%): {stats.low_efficiency}")
+    lines.append("")
+
+    # Detailed entries
+    if entries:
+        lines.append("QUOTAS")
+        lines.append("-" * 100)
+        lines.append(f"{'Type':<10} {'User':<15} {'Path':<30} {'Used':>12} {'Hard':>12} {'Usage':>8} {'Eff':>8}")
+        lines.append("-" * 100)
+
+        for entry in entries[:50]:  # Limit to first 50 for text output
+            lines.append(
+                f"{entry.type:<10} {entry.applies_to:<15} {entry.path:<30} "
+                f"{QuotaEntry.format_size(entry.used_bytes):>12} "
+                f"{QuotaEntry.format_size(entry.hard_bytes):>12} "
+                f"{entry.usage_pct:>7.1f}% "
+                f"{entry.efficiency:>8}"
+            )
+
+        if len(entries) > 50:
+            lines.append(f"... and {len(entries) - 50} more entries")
+
+    lines.append("")
+    lines.append("=" * 100)
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_markdown(entries: List[QuotaEntry], stats: QuotaStats, title: str) -> str:
+    """Format as Markdown."""
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = []
+
+    lines.append(f"# {title}")
+    lines.append("")
+    lines.append(f"**Generated:** {generated_at}")
+    lines.append("")
+
+    # Summary
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|------:|")
+    lines.append(f"| Total Entries | {stats.total_entries} |")
+    lines.append(f"| Total Hard Limit | {QuotaEntry.format_size(stats.total_hard)} |")
+    lines.append(f"| Total Used | {QuotaEntry.format_size(stats.total_used)} |")
+    lines.append(f"| Overall Usage | {(stats.total_used/stats.total_hard*100) if stats.total_hard > 0 else 0:.1f}% |")
+    lines.append(f"| Avg Usage per Quota | {stats.avg_usage_pct:.1f}% |")
+    if stats.avg_efficiency > 0:
+        lines.append(f"| Avg Efficiency | {stats.avg_efficiency:.1f}% |")
+    lines.append("")
+
+    # Issues
+    if stats.over_hard > 0 or stats.over_soft > 0 or stats.high_usage > 0:
+        lines.append("## Issues")
+        lines.append("")
+        lines.append("| Issue | Count |")
+        lines.append("|-------|------:|")
+        if stats.over_hard > 0:
+            lines.append(f"| Over Hard Limit | {stats.over_hard} |")
+        if stats.over_soft > 0:
+            lines.append(f"| Over Soft Limit | {stats.over_soft} |")
+        if stats.high_usage > 0:
+            lines.append(f"| High Usage (>80%) | {stats.high_usage} |")
+        if stats.low_efficiency > 0:
+            lines.append(f"| Low Efficiency (<50%) | {stats.low_efficiency} |")
+        lines.append("")
+
+    # Detailed entries
+    if entries:
+        lines.append("## Quotas")
+        lines.append("")
+        lines.append("| Type | User | Path | Used | Hard | Usage % | Efficiency |")
+        lines.append("|------|------|------|-----:|-----:|--------:|-----------:|")
+
+        for entry in entries[:100]:  # Limit for markdown
+            lines.append(
+                f"| {entry.type} | {entry.applies_to} | {entry.path} | "
+                f"{QuotaEntry.format_size(entry.used_bytes)} | "
+                f"{QuotaEntry.format_size(entry.hard_bytes)} | "
+                f"{entry.usage_pct:.1f}% | {entry.efficiency} |"
+            )
+
+        if len(entries) > 100:
+            lines.append("")
+            lines.append(f"*... and {len(entries) - 100} more entries*")
+
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_json_output(entries: List[QuotaEntry], stats: QuotaStats, title: str) -> str:
+    """Format as JSON."""
+    data = {
+        'title': title,
+        'generated_at': datetime.now().isoformat(),
+        'summary': {
+            'total_entries': stats.total_entries,
+            'total_hard_bytes': stats.total_hard,
+            'total_hard_human': QuotaEntry.format_size(stats.total_hard),
+            'total_used_bytes': stats.total_used,
+            'total_used_human': QuotaEntry.format_size(stats.total_used),
+            'overall_usage_pct': (stats.total_used / stats.total_hard * 100) if stats.total_hard > 0 else 0,
+            'avg_usage_pct': stats.avg_usage_pct,
+            'avg_efficiency_pct': stats.avg_efficiency,
+            'over_hard_limit': stats.over_hard,
+            'over_soft_limit': stats.over_soft,
+            'high_usage_count': stats.high_usage,
+            'low_efficiency_count': stats.low_efficiency,
+        },
+        'quotas': [
+            {
+                'type': e.type,
+                'applies_to': e.applies_to,
+                'path': e.path,
+                'snap': e.snap,
+                'hard': e.hard,
+                'hard_bytes': e.hard_bytes,
+                'soft': e.soft,
+                'soft_bytes': e.soft_bytes,
+                'used': e.used,
+                'used_bytes': e.used_bytes,
+                'usage_pct': e.usage_pct,
+                'efficiency': e.efficiency,
+                'efficiency_pct': e.efficiency_pct,
+            }
+            for e in entries
+        ],
+    }
+
+    return json.dumps(data, indent=2)
+
+
+def format_html(entries: List[QuotaEntry], stats: QuotaStats, title: str) -> str:
+    """Format as HTML."""
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }}
+        .timestamp {{
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 20px;
+        }}
+        .section {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }}
+        .stat-box {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }}
+        .stat-value {{
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #2c3e50;
+        }}
+        .stat-label {{
+            color: #666;
+            font-size: 0.85em;
+            margin-top: 5px;
+        }}
+        .stat-good {{ color: #27ae60; }}
+        .stat-warning {{ color: #f39c12; }}
+        .stat-danger {{ color: #e74c3c; }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }}
+        th {{
+            background: #34495e;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            cursor: pointer;
+        }}
+        th:hover {{
+            background: #2c3e50;
+        }}
+        td {{
+            padding: 10px 12px;
+            border-bottom: 1px solid #eee;
+        }}
+        tr:hover {{
+            background: #f8f9fa;
+        }}
+        .usage-high {{ background: #ffe6e6; }}
+        .usage-medium {{ background: #fff9e6; }}
+        .usage-good {{ background: #e6f7ee; }}
+    </style>
+</head>
+<body>
+    <h1>{title}</h1>
+    <p class="timestamp">Generated: {generated_at}</p>
+
+    <div class="section">
+        <h2>Summary</h2>
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value">{stats.total_entries}</div>
+                <div class="stat-label">Total Quotas</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{QuotaEntry.format_size(stats.total_used)}</div>
+                <div class="stat-label">Total Used</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{QuotaEntry.format_size(stats.total_hard)}</div>
+                <div class="stat-label">Total Limit</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value {'stat-danger' if (stats.total_used/stats.total_hard*100) >= 90 else 'stat-warning' if (stats.total_used/stats.total_hard*100) >= 80 else 'stat-good'}">{(stats.total_used/stats.total_hard*100) if stats.total_hard > 0 else 0:.1f}%</div>
+                <div class="stat-label">Overall Usage</div>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value stat-danger">{stats.over_hard}</div>
+                <div class="stat-label">Over Hard Limit</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-warning">{stats.over_soft}</div>
+                <div class="stat-label">Over Soft Limit</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value stat-warning">{stats.high_usage}</div>
+                <div class="stat-label">High Usage (>80%)</div>
+            </div>
+"""
+
+    if stats.avg_efficiency > 0:
+        html += f"""            <div class="stat-box">
+                <div class="stat-value">{stats.avg_efficiency:.1f}%</div>
+                <div class="stat-label">Avg Efficiency</div>
+            </div>
+"""
+
+    html += """        </div>
+    </div>
+
+    <div class="section">
+        <h2>Quota Details</h2>
+        <table id="quota-table">
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>User/Group</th>
+                    <th>Path</th>
+                    <th>Used</th>
+                    <th>Hard Limit</th>
+                    <th>Usage %</th>
+                    <th>Efficiency</th>
+                </tr>
+            </thead>
+            <tbody>
+"""
+
+    for entry in entries[:500]:  # Limit to 500 for HTML
+        usage_class = 'usage-high' if entry.usage_pct >= 80 else 'usage-medium' if entry.usage_pct >= 50 else 'usage-good'
+        html += f"""                <tr class="{usage_class}">
+                    <td>{entry.type}</td>
+                    <td>{entry.applies_to}</td>
+                    <td>{entry.path}</td>
+                    <td>{QuotaEntry.format_size(entry.used_bytes)}</td>
+                    <td>{QuotaEntry.format_size(entry.hard_bytes)}</td>
+                    <td>{entry.usage_pct:.1f}%</td>
+                    <td>{entry.efficiency}</td>
+                </tr>
+"""
+
+    if len(entries) > 500:
+        html += f"""                <tr>
+                    <td colspan="7" style="text-align: center; font-style: italic; color: #666;">
+                        ... and {len(entries) - 500} more entries
+                    </td>
+                </tr>
+"""
+
+    html += """            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+"""
+
+    return html
+
+
+def format_mdhtml(entries: List[QuotaEntry], stats: QuotaStats, title: str) -> str:
+    """Format as Markdown with embedded HTML."""
+    generated_at = datetime.now().strftime("%y-%m-%d %H:%M:%S")
+
+    md = f"""## {title}
+
+<style>
+.quota-table {{ border-collapse: collapse; width: 100%; }}
+.quota-table th {{ background: #005f85; color: white; padding: 8px 12px; text-align: left; white-space: nowrap; }}
+.quota-table td {{ padding: 8px 12px; border-bottom: 1px solid #ddd; white-space: nowrap; }}
+.quota-table tr:hover {{ background: #f5f5f5; }}
+.quota-good {{ color: #28a745; font-weight: bold; }}
+.quota-warn {{ color: #f39c12; font-weight: bold; }}
+.quota-bad {{ color: #e74c3c; font-weight: bold; }}
+.quota-highlight {{ background: #fff3cd; }}
+details {{ margin-bottom: 8px; }}
+details > summary {{ background: #005f85; color: white; padding: 8px 12px; border-radius: 4px; cursor: pointer; list-style: none; }}
+details > summary::-webkit-details-marker {{ display: none; }}
+details > summary::before {{ content: '▶ '; font-size: 0.8em; }}
+details[open] > summary {{ border-radius: 4px 4px 0 0; }}
+details[open] > summary::before {{ content: '▼ '; }}
+</style>
+
+<table class="quota-table">
+<tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Total Quotas</td><td>{stats.total_entries}</td></tr>
+<tr><td>Total Used</td><td>{QuotaEntry.format_size(stats.total_used)}</td></tr>
+<tr><td>Total Limit</td><td>{QuotaEntry.format_size(stats.total_hard)}</td></tr>
+<tr><td>Overall Usage</td><td class="{'quota-bad' if (stats.total_used/stats.total_hard*100) >= 90 else 'quota-warn' if (stats.total_used/stats.total_hard*100) >= 80 else 'quota-good'}">{(stats.total_used/stats.total_hard*100) if stats.total_hard > 0 else 0:.1f}%</td></tr>
+</table>
+
+<details>
+<summary><strong>Issues</strong> — <span class="quota-bad">{stats.over_hard}</span> over hard, <span class="quota-warn">{stats.over_soft}</span> over soft</summary>
+<table class="quota-table">
+<tr><th>Issue</th><th>Count</th></tr>
+<tr><td>Over Hard Limit</td><td class="quota-bad">{stats.over_hard}</td></tr>
+<tr><td>Over Soft Limit</td><td class="quota-warn">{stats.over_soft}</td></tr>
+<tr><td>High Usage (>80%)</td><td class="quota-warn">{stats.high_usage}</td></tr>
+"""
+
+    if stats.low_efficiency > 0:
+        md += f"<tr><td>Low Efficiency (<50%)</td><td class=\"quota-warn\">{stats.low_efficiency}</td></tr>\n"
+
+    md += """</table>
+</details>
+
+<details>
+<summary><strong>Quotas</strong></summary>
+<table class="quota-table">
+<tr><th>Type</th><th>User</th><th>Path</th><th>Used</th><th>Limit</th><th>Usage %</th><th>Eff</th></tr>
+"""
+
+    for entry in entries[:100]:
+        usage_class = 'quota-bad' if entry.usage_pct >= 90 else 'quota-warn' if entry.usage_pct >= 80 else 'quota-good'
+        row_class = 'quota-highlight' if entry.usage_pct >= 80 else ''
+        md += f"<tr class=\"{row_class}\"><td>{entry.type}</td><td>{entry.applies_to}</td><td>{entry.path}</td><td>{QuotaEntry.format_size(entry.used_bytes)}</td><td>{QuotaEntry.format_size(entry.hard_bytes)}</td><td class=\"{usage_class}\">{entry.usage_pct:.1f}%</td><td>{entry.efficiency}</td></tr>\n"
+
+    if len(entries) > 100:
+        md += f"<tr><td colspan=\"7\" style=\"text-align: center; font-style: italic;\">... and {len(entries) - 100} more entries</td></tr>\n"
+
+    md += """</table>
+</details>
+
+"""
+
+    md += f"<p style=\"font-size: 0.8em; color: #888; margin-top: 10px;\">Generated: {generated_at}</p>\n"
+
+    return md
+
+
+# =============================================================================
+# CLI Commands
+# =============================================================================
+
+def cmd_admin(args: argparse.Namespace) -> int:
+    """Show admin view of all quotas."""
+    parser = QuotaParser(args.file)
+    entries = parser.parse()
+    stats = parser.calculate_stats()
+
+    title = f"Storage Quota Report - Admin View"
+
+    # Format output
+    if args.format == 'json':
+        output = format_json_output(entries, stats, title)
+    elif args.format == 'html':
+        output = format_html(entries, stats, title)
+    elif args.format == 'markdown':
+        output = format_markdown(entries, stats, title)
+    elif args.format == 'mdhtml':
+        output = format_mdhtml(entries, stats, title)
+    else:
+        output = format_text(entries, stats, title)
+
+    # Write output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        if not args.quiet:
+            print(f"Report written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+    return 0
+
+
+def cmd_user(args: argparse.Namespace) -> int:
+    """Show per-user view."""
+    parser = QuotaParser(args.file)
+    parser.parse()
+
+    entries = parser.filter_by_user(args.username)
+
+    if not entries:
+        print(f"No quotas found for user: {args.username}", file=sys.stderr)
+        return 1
+
+    stats = parser.calculate_stats(entries)
+    title = f"Storage Quota Report - User: {args.username}"
+
+    # Format output
+    if args.format == 'json':
+        output = format_json_output(entries, stats, title)
+    elif args.format == 'html':
+        output = format_html(entries, stats, title)
+    elif args.format == 'markdown':
+        output = format_markdown(entries, stats, title)
+    elif args.format == 'mdhtml':
+        output = format_mdhtml(entries, stats, title)
+    else:
+        output = format_text(entries, stats, title)
+
+    # Write output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        if not args.quiet:
+            print(f"Report written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+    return 0
+
+
+def cmd_highlights(args: argparse.Namespace) -> int:
+    """Show highlights view (high usage, low efficiency)."""
+    parser = QuotaParser(args.file)
+    parser.parse()
+
+    entries = parser.get_highlights(
+        threshold_usage=args.usage_threshold,
+        threshold_efficiency=args.efficiency_threshold
+    )
+
+    if not entries:
+        print("No highlighted quotas found.", file=sys.stderr)
+        return 0
+
+    # Sort by usage percentage (highest first)
+    entries.sort(key=lambda e: e.usage_pct, reverse=True)
+
+    stats = parser.calculate_stats(entries)
+    title = f"Storage Quota Report - Highlights (Usage ≥{args.usage_threshold}% or Efficiency <{args.efficiency_threshold}%)"
+
+    # Format output
+    if args.format == 'json':
+        output = format_json_output(entries, stats, title)
+    elif args.format == 'html':
+        output = format_html(entries, stats, title)
+    elif args.format == 'markdown':
+        output = format_markdown(entries, stats, title)
+    elif args.format == 'mdhtml':
+        output = format_mdhtml(entries, stats, title)
+    else:
+        output = format_text(entries, stats, title)
+
+    # Write output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output)
+        if not args.quiet:
+            print(f"Report written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+    return 0
+
+
+def create_parser() -> argparse.ArgumentParser:
+    """Create argument parser."""
+    parser = argparse.ArgumentParser(
+        prog='storage-report',
+        description='Display storage quota usage from Isilon quota reports',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  storage-report quotas.txt                        Show admin view
+  storage-report quotas.txt --user jsmith          Show user's quotas
+  storage-report quotas.txt --highlights           Show high usage quotas
+  storage-report quotas.txt --format json          Output as JSON
+  storage-report quotas.txt --format html -o r.html   Generate HTML report
+  storage-report quotas.txt --format mdhtml        Markdown with HTML (for dashboards)
+"""
+    )
+
+    parser.add_argument('file', help='Path to quota data file')
+    parser.add_argument('--version', '-V', action='version', version=f'%(prog)s {__version__}')
+    parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
+                       default='text', help='Output format (default: text)')
+    parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                       help='Suppress progress messages')
+
+    # Subcommands
+    subparsers = parser.add_subparsers(dest='command', help='View type')
+
+    # User view
+    user_parser = subparsers.add_parser('user', help='Show per-user quotas',
+                                        parents=[],
+                                        add_help=False)
+    user_parser.add_argument('username', help='Username to filter by')
+    user_parser.add_argument('-h', '--help', action='help', help='Show this help message')
+    user_parser.set_defaults(func=lambda args: cmd_user(args))
+
+    # Highlights view
+    highlight_parser = subparsers.add_parser('highlights', help='Show high usage/low efficiency quotas',
+                                             parents=[],
+                                             add_help=False)
+    highlight_parser.add_argument('--usage-threshold', type=float, default=80.0,
+                                 help='Usage percentage threshold (default: 80)')
+    highlight_parser.add_argument('--efficiency-threshold', type=float, default=50.0,
+                                 help='Efficiency percentage threshold (default: 50)')
+    highlight_parser.add_argument('-h', '--help', action='help', help='Show this help message')
+    highlight_parser.set_defaults(func=lambda args: cmd_highlights(args))
+
+    return parser
+
+
+def main() -> int:
+    """Main entry point."""
+    # Check if command is specified, otherwise default to admin view
+    argv = sys.argv[1:]
+
+    # If no command specified and first arg is a file, default to admin view
+    if len(argv) > 0 and not argv[0].startswith('-'):
+        # Check if it looks like a file path and not a subcommand
+        if argv[0] not in ['user', 'highlights'] and '.' in argv[0]:
+            # This is likely a file path, default to admin view
+            pass
+
+    parser = create_parser()
+    args = parser.parse_args(argv)
+
+    # Default to admin view if no command specified
+    if not hasattr(args, 'func'):
+        # Create namespace for admin command
+        args.user = None
+        args.usage_threshold = 80.0
+        args.efficiency_threshold = 50.0
+        return cmd_admin(args)
+
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
