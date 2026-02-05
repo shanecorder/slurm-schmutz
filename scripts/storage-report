@@ -844,12 +844,13 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  storage-report quotas.txt                        Show admin view
-  storage-report quotas.txt --user jsmith          Show user's quotas
-  storage-report quotas.txt --highlights           Show high usage quotas
-  storage-report quotas.txt --format json          Output as JSON
-  storage-report quotas.txt --format html -o r.html   Generate HTML report
-  storage-report quotas.txt --format mdhtml        Markdown with HTML (for dashboards)
+  storage-report quotas.txt                              Show admin view
+  storage-report quotas.txt user jsmith                  Show user's quotas
+  storage-report quotas.txt highlights                   Show high usage quotas
+  storage-report quotas.txt --format json                Output as JSON
+  storage-report quotas.txt --format html -o report.html Generate HTML report
+  storage-report quotas.txt user jsmith --format html -o user.html   User report as HTML
+  storage-report quotas.txt highlights --usage-threshold 90 --format mdhtml -o highlights.md
 """
     )
 
@@ -865,22 +866,26 @@ Examples:
     subparsers = parser.add_subparsers(dest='command', help='View type')
 
     # User view
-    user_parser = subparsers.add_parser('user', help='Show per-user quotas',
-                                        parents=[],
-                                        add_help=False)
+    user_parser = subparsers.add_parser('user', help='Show per-user quotas')
     user_parser.add_argument('username', help='Username to filter by')
-    user_parser.add_argument('-h', '--help', action='help', help='Show this help message')
+    user_parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
+                            default='text', help='Output format (default: text)')
+    user_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    user_parser.add_argument('--quiet', '-q', action='store_true', default=False,
+                            help='Suppress progress messages')
     user_parser.set_defaults(func=lambda args: cmd_user(args))
 
     # Highlights view
-    highlight_parser = subparsers.add_parser('highlights', help='Show high usage/low efficiency quotas',
-                                             parents=[],
-                                             add_help=False)
+    highlight_parser = subparsers.add_parser('highlights', help='Show high usage/low efficiency quotas')
     highlight_parser.add_argument('--usage-threshold', type=float, default=80.0,
                                  help='Usage percentage threshold (default: 80)')
     highlight_parser.add_argument('--efficiency-threshold', type=float, default=50.0,
                                  help='Efficiency percentage threshold (default: 50)')
-    highlight_parser.add_argument('-h', '--help', action='help', help='Show this help message')
+    highlight_parser.add_argument('--format', '-f', choices=['text', 'json', 'html', 'markdown', 'mdhtml'],
+                                 default='text', help='Output format (default: text)')
+    highlight_parser.add_argument('--output', '-o', help='Output file (default: stdout)')
+    highlight_parser.add_argument('--quiet', '-q', action='store_true', default=False,
+                                 help='Suppress progress messages')
     highlight_parser.set_defaults(func=lambda args: cmd_highlights(args))
 
     return parser

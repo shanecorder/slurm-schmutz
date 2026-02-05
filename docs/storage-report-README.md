@@ -62,10 +62,13 @@ Output formats:
 View quotas for a specific user:
 
 ```bash
+# Basic user view
 ./scripts/storage-report quotas.txt user USERNAME
 
-# With output format
+# With output format (options can come before OR after the subcommand)
 ./scripts/storage-report quotas.txt --format html -o user-report.html user USERNAME
+# OR
+./scripts/storage-report quotas.txt user USERNAME --format html -o user-report.html
 ```
 
 ### Highlights View
