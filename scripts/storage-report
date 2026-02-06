@@ -269,8 +269,38 @@ class QuotaParser:
         return stats
 
     def filter_by_user(self, username: str) -> List[QuotaEntry]:
-        """Filter entries by username."""
-        return [e for e in self.entries if e.applies_to == username]
+        """Filter entries by username.
+
+        Supports flexible matching:
+        - Exact match: 'HLM\\user123'
+        - Partial match (without domain): 'user123' matches 'HLM\\user123'
+        - Case-insensitive matching
+        """
+        matches = []
+        username_lower = username.lower()
+
+        for entry in self.entries:
+            applies_to = entry.applies_to
+            applies_to_lower = applies_to.lower()
+
+            # Try exact match (case-insensitive)
+            if applies_to_lower == username_lower:
+                matches.append(entry)
+                continue
+
+            # Try matching without domain prefix (e.g., "user" matches "DOMAIN\user")
+            if '\\' in applies_to:
+                # Split on backslash and check if username matches the part after the domain
+                parts = applies_to.split('\\')
+                if len(parts) == 2 and parts[1].lower() == username_lower:
+                    matches.append(entry)
+                    continue
+
+            # Try partial match - username is part of applies_to
+            if username_lower in applies_to_lower:
+                matches.append(entry)
+
+        return matches
 
     def get_highlights(self, threshold_usage: float = 80.0, threshold_efficiency: float = 50.0) -> List[QuotaEntry]:
         """Get entries that are over threshold or have low efficiency."""

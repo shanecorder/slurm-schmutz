@@ -23,6 +23,11 @@ A Python script for generating comprehensive storage quota reports from Isilon q
   - Identification of quotas over soft/hard limits
   - Highlighting of high usage (>80%) quotas
 
+- **Flexible User Matching:**
+  - Works with or without domain prefixes (e.g., `user` or `DOMAIN\user`)
+  - Case-insensitive username search
+  - Partial matching support
+
 ## Installation
 
 The script is located in `scripts/storage-report` and is self-contained with no external dependencies beyond Python 3.7+.
@@ -59,16 +64,24 @@ Output formats:
 
 ### Per-User View
 
-View quotas for a specific user:
+View quotas for a specific user. The username matching is flexible:
+- **Without domain prefix**: `./scripts/storage-report quotas.txt user jsmith`
+- **With domain prefix**: `./scripts/storage-report quotas.txt user 'DOMAIN\jsmith'`
+- **Case-insensitive**: Both `jsmith` and `JSmith` will work
+
+If your quota file has domain-prefixed usernames like `HLM\username`, you can search with just `username` and the script will find it.
 
 ```bash
-# Basic user view
-./scripts/storage-report quotas.txt user USERNAME
+# Basic user view (matches both "jsmith" and "HLM\jsmith")
+./scripts/storage-report quotas.txt user jsmith
+
+# With full domain\username
+./scripts/storage-report quotas.txt user 'HLM\jsmith'
 
 # With output format (options can come before OR after the subcommand)
-./scripts/storage-report quotas.txt --format html -o user-report.html user USERNAME
+./scripts/storage-report quotas.txt --format html -o user-report.html user jsmith
 # OR
-./scripts/storage-report quotas.txt user USERNAME --format html -o user-report.html
+./scripts/storage-report quotas.txt user jsmith --format html -o user-report.html
 ```
 
 ### Highlights View
